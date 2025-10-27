@@ -1,0 +1,35 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/maslab1/L-CDF/devel/include/**",
+        "/home/maslab1/workspace/ws_livox/devel/include/**",
+        "/home/maslab1/catkin_ws/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/home/maslab1/catkin_ws/src/VINS-Fusion-noetic-Opencv4/camera_models/include/**",
+        "/home/maslab1/catkin_ws/src/FAST_LIO/include/**",
+        "/home/maslab1/catkin_ws/src/FAST_LIO_SAM/FAST_LIO_SAM/include/**",
+        "/home/maslab1/catkin_ws/src/hunter_ros/hunter_base/include/**",
+        "/home/maslab1/L-CDF/src/local_map/include/**",
+        "/home/maslab1/L-CDF/src/obs_param/include/**",
+        "/home/maslab1/L-CDF/src/obstacle_based_cdf/include/**",
+        "/home/maslab1/catkin_ws/src/ouster-ros/include/**",
+        "/home/maslab1/catkin_ws/src/realsense-ros/realsense2_camera/include/**",
+        "/home/maslab1/L-CDF/src/scene/include/**",
+        "/home/maslab1/L-CDF/src/sensor_cdf/include/**",
+        "/home/maslab1/catkin_ws/src/ugv_sdk/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

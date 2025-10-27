@@ -1,0 +1,8 @@
+prefix=/home/maslab1/L-CDF/install
+
+Name: obs_param
+Description: Description of obs_param
+Version: 0.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib 
+Requires: 

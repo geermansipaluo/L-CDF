@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+
+<launch>
+    <node name="convert_pointcloud2d" pkg="sensor_cdf" type="convert_pointcloud2d.py"/>
+    <!-- 以下是DensityNet方法的启动 -->
+    <!-- <node name="lidar_cdf_test" pkg="sensor_cdf" type="lidar_u_test.py" output="screen"/> -->
+    <!-- 以下是GP-CBF方法的启动 -->
+    <node name="gaussian_planner" pkg="sensor_cdf" type="gaussian_planner.py" output="screen"/>
+    <!-- 以下是CDF-Base 方法的启动 -->
+    <!-- <node name="run_cdf" pkg="sensor_cdf" type="run_cdf.py" output="screen"/>
+    <include file="$(find local_map)/launch/for_simulation.launch" />
+    <node pkg="obs_param" type="obs_kf" name="obs_kf" /> -->
+    
+</launch>

@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+
+<launch>
+    <include file="$(find scene)/launch/start.launch">
+        <arg name="world" value="$(find scene)/worlds/world.world" />
+    </include>
+
+    <include file="$(find jackal_description)/launch/description.launch" />
+    <include file="$(find jackal_control)/launch/control.launch">
+        <arg name="enable_ekf" value="false" />
+    </include>
+    <include file="$(find jackal_control)/launch/teleop.launch">
+        <arg name="joystick" value="false" />
+    </include>
+
+    <!-- <node pkg="tf" type="static_transform_publisher" name="world_odom_broadcaster" args="0 0 0 0 0 0 1 world odom 100" />  -->
+
+    <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
+        args="-urdf -model jackal -param robot_description -x -10 -y 0.1 -z 1.0" />
+
+    <include file="$(find local_map)/launch/for_simulation.launch" />
+
+    <include file="$(find scene)/launch/movetest_node.launch" />
+
+    <node pkg="obs_param" type="obs_kf" output="screen" name="obs_kf" />
+
+    <!-- <node name="local_planner" pkg="local_planner" type="local_planner.py" output="screen"/>
+    <node name="controller" pkg="local_planner" type="controller.py"/> -->
+
+    <!-- <node name="run_cdf" pkg="sensor_cdf" type="run_cdf.py" output="screen"/> -->
+    <!-- <node name="run_cdf_test" pkg="sensor_cdf" type="run_cdf_test.py" output="screen"/> -->
+    <node name="lidar_cdf_test" pkg="sensor_cdf" type="lidar_cdf_test.py" output="screen"/>
+    <node name="update_state" pkg="sensor_cdf" type="update_state.py"/>
+    <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py"/>
+    <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py"/>
+    <node name="convert_pointcloud2d" pkg="sensor_cdf" type="convert_pointcloud2d.py"/>
+    <!-- <node name="run_cdf_test" pkg="obstacle_based_cdf" type="run_cdf_test.py" output="screen"/>
+    <node name="update_state" pkg="obstacle_based_cdf" type="update_state.py"/>
+    <node name="goal_publisher" pkg="obstacle_based_cdf" type="goal_publisher.py"/>
+    <node name="pose_pub_astar" pkg="obstacle_based_cdf" type="pose_pub_astar.py"/> -->
+    <!-- <node name="convert_pointcloud2d" pkg="obstacle_based_cdf" type="convert_pointcloud2d.py"/> -->
+
+    <!-- <include file="$(find global_path_publisher)/launch/pub_global_path.launch" /> -->
+
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find scene)/rviz_config/simulation.rviz" required="true" />
+
+</launch>

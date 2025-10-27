@@ -1,0 +1,2 @@
+catkin_simple:global_path_publisher:jackal/jackal_control:jackal/jackal_description:local_map:local_planner:obs_param:obstacle_based_cdf:scene:sensor_cdf
+-DCATKIN_DEVEL_PREFIX=/home/maslab1/L-CDF/devel -DCMAKE_INSTALL_PREFIX=/home/maslab1/L-CDF/install -G Unix Makefiles
