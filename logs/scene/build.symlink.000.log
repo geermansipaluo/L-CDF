@@ -1,0 +1,5 @@
+Symlinking /home/guo/L-CDF/devel/lib/scene/movetest_node
+Symlinking /home/guo/L-CDF/devel/lib/scene/getrobot_pose
+Symlinking /home/guo/L-CDF/devel/lib/pkgconfig/scene.pc
+Symlinking /home/guo/L-CDF/devel/share/scene/cmake/sceneConfig-version.cmake
+Symlinking /home/guo/L-CDF/devel/share/scene/cmake/sceneConfig.cmake

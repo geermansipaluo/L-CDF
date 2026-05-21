@@ -1,6 +1,1 @@
-
-"use strict";
-
-module.exports = {
-  msg: require('./msg/_index.js'),
-};
+/home/guo/L-CDF/devel/.private/sensor_cdf/share/gennodejs/ros/sensor_cdf/_index.js

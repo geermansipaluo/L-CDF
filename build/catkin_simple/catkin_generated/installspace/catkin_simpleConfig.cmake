@@ -67,14 +67,14 @@ set(catkin_simple_CONFIG_INCLUDED TRUE)
 
 # set variables for source/devel/install prefixes
 if("FALSE" STREQUAL "TRUE")
-  set(catkin_simple_SOURCE_PREFIX /home/maslab1/L-CDF/src/catkin_simple)
-  set(catkin_simple_DEVEL_PREFIX /home/maslab1/L-CDF/devel)
+  set(catkin_simple_SOURCE_PREFIX /home/guo/L-CDF/src/catkin_simple)
+  set(catkin_simple_DEVEL_PREFIX /home/guo/L-CDF/devel/.private/catkin_simple)
   set(catkin_simple_INSTALL_PREFIX "")
   set(catkin_simple_PREFIX ${catkin_simple_DEVEL_PREFIX})
 else()
   set(catkin_simple_SOURCE_PREFIX "")
   set(catkin_simple_DEVEL_PREFIX "")
-  set(catkin_simple_INSTALL_PREFIX /home/maslab1/L-CDF/install)
+  set(catkin_simple_INSTALL_PREFIX /home/guo/L-CDF/install)
   set(catkin_simple_PREFIX ${catkin_simple_INSTALL_PREFIX})
 endif()
 
@@ -156,7 +156,7 @@ foreach(library ${libraries})
     set(lib_path "")
     set(lib "${library}-NOTFOUND")
     # since the path where the library is found is returned we have to iterate over the paths manually
-    foreach(path /home/maslab1/L-CDF/install/lib;/home/maslab1/workspace/ws_livox/devel/lib;/home/maslab1/catkin_ws/devel/lib;/opt/ros/noetic/lib)
+    foreach(path /home/guo/L-CDF/install/lib;/home/guo/L-CDF/devel/lib;/opt/ros/noetic/lib)
       find_library(lib ${library}
         PATHS ${path}
         NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)

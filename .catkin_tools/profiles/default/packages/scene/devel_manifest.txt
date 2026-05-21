@@ -1,0 +1,6 @@
+scene
+/home/guo/L-CDF/devel/.private/scene/lib/scene/movetest_node /home/guo/L-CDF/devel/lib/scene/movetest_node
+/home/guo/L-CDF/devel/.private/scene/lib/scene/getrobot_pose /home/guo/L-CDF/devel/lib/scene/getrobot_pose
+/home/guo/L-CDF/devel/.private/scene/lib/pkgconfig/scene.pc /home/guo/L-CDF/devel/lib/pkgconfig/scene.pc
+/home/guo/L-CDF/devel/.private/scene/share/scene/cmake/sceneConfig-version.cmake /home/guo/L-CDF/devel/share/scene/cmake/sceneConfig-version.cmake
+/home/guo/L-CDF/devel/.private/scene/share/scene/cmake/sceneConfig.cmake /home/guo/L-CDF/devel/share/scene/cmake/sceneConfig.cmake

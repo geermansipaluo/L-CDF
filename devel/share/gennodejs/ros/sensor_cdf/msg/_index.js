@@ -1,8 +1,1 @@
-
-"use strict";
-
-let Array = require('./Array.js');
-
-module.exports = {
-  Array: Array,
-};
+/home/guo/L-CDF/devel/.private/sensor_cdf/share/gennodejs/ros/sensor_cdf/msg/_index.js

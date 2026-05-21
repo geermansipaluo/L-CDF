@@ -1,5 +1,5 @@
 file(REMOVE_RECURSE
-  "/home/maslab1/L-CDF/devel/include/sensor_cdf/Array.h"
+  "/home/guo/L-CDF/devel/.private/sensor_cdf/include/sensor_cdf/Array.h"
   "CMakeFiles/sensor_cdf_generate_messages_cpp"
 )
 

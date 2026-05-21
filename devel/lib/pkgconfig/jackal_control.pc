@@ -1,8 +1,1 @@
-prefix=/home/maslab1/L-CDF/devel
-
-Name: jackal_control
-Description: Description of jackal_control
-Version: 0.8.8
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 
+/home/guo/L-CDF/devel/.private/jackal_control/lib/pkgconfig/jackal_control.pc

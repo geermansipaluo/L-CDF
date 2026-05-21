@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "/home/maslab1/L-CDF/devel/share/roseus/ros/sensor_cdf/manifest.l"
-  "/home/maslab1/L-CDF/devel/share/roseus/ros/sensor_cdf/msg/Array.l"
+  "/home/guo/L-CDF/devel/.private/sensor_cdf/share/roseus/ros/sensor_cdf/manifest.l"
+  "/home/guo/L-CDF/devel/.private/sensor_cdf/share/roseus/ros/sensor_cdf/msg/Array.l"
   "CMakeFiles/sensor_cdf_generate_messages_eus"
 )
 

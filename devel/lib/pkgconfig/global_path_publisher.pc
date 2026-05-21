@@ -1,8 +1,1 @@
-prefix=/home/maslab1/L-CDF/devel
-
-Name: global_path_publisher
-Description: Description of global_path_publisher
-Version: 0.0.0
-Cflags: 
-Libs: -L${prefix}/lib 
-Requires: 
+/home/guo/L-CDF/devel/.private/global_path_publisher/lib/pkgconfig/global_path_publisher.pc

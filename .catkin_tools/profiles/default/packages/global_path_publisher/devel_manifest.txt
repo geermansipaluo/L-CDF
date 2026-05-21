@@ -1,0 +1,5 @@
+global_path_publisher
+/home/guo/L-CDF/devel/.private/global_path_publisher/lib/global_path_publisher/global_path_pub /home/guo/L-CDF/devel/lib/global_path_publisher/global_path_pub
+/home/guo/L-CDF/devel/.private/global_path_publisher/lib/pkgconfig/global_path_publisher.pc /home/guo/L-CDF/devel/lib/pkgconfig/global_path_publisher.pc
+/home/guo/L-CDF/devel/.private/global_path_publisher/share/global_path_publisher/cmake/global_path_publisherConfig-version.cmake /home/guo/L-CDF/devel/share/global_path_publisher/cmake/global_path_publisherConfig-version.cmake
+/home/guo/L-CDF/devel/.private/global_path_publisher/share/global_path_publisher/cmake/global_path_publisherConfig.cmake /home/guo/L-CDF/devel/share/global_path_publisher/cmake/global_path_publisherConfig.cmake

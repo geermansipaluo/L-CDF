@@ -1,7 +1,8 @@
 file(REMOVE_RECURSE
-  "/home/maslab1/L-CDF/devel/lib/local_map/local_map_pub"
-  "/home/maslab1/L-CDF/devel/lib/local_map/local_map_pub.pdb"
+  "/home/guo/L-CDF/devel/.private/local_map/lib/local_map/local_map_pub"
+  "/home/guo/L-CDF/devel/.private/local_map/lib/local_map/local_map_pub.pdb"
   "CMakeFiles/local_map_pub.dir/src/local_map_pub.cpp.o"
+  "CMakeFiles/local_map_pub.dir/src/local_map_pub.cpp.o.d"
 )
 
 # Per-language clean rules from dependency scanning.

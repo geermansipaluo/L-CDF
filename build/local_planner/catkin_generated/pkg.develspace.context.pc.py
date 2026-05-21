@@ -4,5 +4,5 @@ PROJECT_PKG_CONFIG_INCLUDE_DIRS = "".split(';') if "" != "" else []
 PROJECT_CATKIN_DEPENDS = "".replace(';', ' ')
 PKG_CONFIG_LIBRARIES_WITH_PREFIX = "".split(';') if "" != "" else []
 PROJECT_NAME = "local_planner"
-PROJECT_SPACE_DIR = "/home/maslab1/L-CDF/devel"
+PROJECT_SPACE_DIR = "/home/guo/L-CDF/devel/.private/local_planner"
 PROJECT_VERSION = "0.0.0"

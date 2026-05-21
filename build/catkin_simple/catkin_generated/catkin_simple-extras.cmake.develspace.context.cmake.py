@@ -2,7 +2,7 @@
 DEVELSPACE = 'TRUE' == 'TRUE'
 INSTALLSPACE = 'FALSE' == 'TRUE'
 
-CATKIN_DEVEL_PREFIX = '/home/maslab1/L-CDF/devel'
+CATKIN_DEVEL_PREFIX = '/home/guo/L-CDF/devel/.private/catkin_simple'
 
 CATKIN_GLOBAL_BIN_DESTINATION = 'bin'
 CATKIN_GLOBAL_ETC_DESTINATION = 'etc'
@@ -20,14 +20,14 @@ CATKIN_PACKAGE_LIBEXEC_DESTINATION = 'lib/catkin_simple'
 CATKIN_PACKAGE_PYTHON_DESTINATION = 'lib/python3/dist-packages/catkin_simple'
 CATKIN_PACKAGE_SHARE_DESTINATION = 'share/catkin_simple'
 
-CMAKE_BINARY_DIR = '/home/maslab1/L-CDF/build'
-CMAKE_CURRENT_BINARY_DIR = '/home/maslab1/L-CDF/build/catkin_simple'
-CMAKE_CURRENT_SOURCE_DIR = '/home/maslab1/L-CDF/src/catkin_simple'
-CMAKE_INSTALL_PREFIX = '/home/maslab1/L-CDF/install'
-CMAKE_SOURCE_DIR = '/home/maslab1/L-CDF/src'
+CMAKE_BINARY_DIR = '/home/guo/L-CDF/build/catkin_simple'
+CMAKE_CURRENT_BINARY_DIR = '/home/guo/L-CDF/build/catkin_simple'
+CMAKE_CURRENT_SOURCE_DIR = '/home/guo/L-CDF/src/catkin_simple'
+CMAKE_INSTALL_PREFIX = '/home/guo/L-CDF/install'
+CMAKE_SOURCE_DIR = '/home/guo/L-CDF/src/catkin_simple'
 
-PKG_CMAKE_DIR = '/home/maslab1/L-CDF/devel/share/catkin_simple/cmake'
+PKG_CMAKE_DIR = '/home/guo/L-CDF/devel/.private/catkin_simple/share/catkin_simple/cmake'
 
 PROJECT_NAME = 'catkin_simple'
-PROJECT_BINARY_DIR = '/home/maslab1/L-CDF/build/catkin_simple'
-PROJECT_SOURCE_DIR = '/home/maslab1/L-CDF/src/catkin_simple'
+PROJECT_BINARY_DIR = '/home/guo/L-CDF/build/catkin_simple'
+PROJECT_SOURCE_DIR = '/home/guo/L-CDF/src/catkin_simple'

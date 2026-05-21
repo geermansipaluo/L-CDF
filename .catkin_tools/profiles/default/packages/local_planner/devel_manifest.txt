@@ -1,0 +1,4 @@
+local_planner
+/home/guo/L-CDF/devel/.private/local_planner/lib/pkgconfig/local_planner.pc /home/guo/L-CDF/devel/lib/pkgconfig/local_planner.pc
+/home/guo/L-CDF/devel/.private/local_planner/share/local_planner/cmake/local_plannerConfig.cmake /home/guo/L-CDF/devel/share/local_planner/cmake/local_plannerConfig.cmake
+/home/guo/L-CDF/devel/.private/local_planner/share/local_planner/cmake/local_plannerConfig-version.cmake /home/guo/L-CDF/devel/share/local_planner/cmake/local_plannerConfig-version.cmake

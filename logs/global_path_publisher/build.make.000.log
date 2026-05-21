@@ -1,0 +1,3 @@
+[ 50%] [32mBuilding CXX object CMakeFiles/global_path_pub.dir/src/global_path_publisher.cpp.o[0m
+[100%] [32m[1mLinking CXX executable /home/guo/L-CDF/devel/.private/global_path_publisher/lib/global_path_publisher/global_path_pub[0m
+[100%] Built target global_path_pub

@@ -1,4 +1,4 @@
-prefix=/home/maslab1/L-CDF/install
+prefix=/home/guo/L-CDF/install
 
 Name: scene
 Description: Description of scene

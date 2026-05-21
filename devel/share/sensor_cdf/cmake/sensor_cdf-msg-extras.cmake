@@ -1,2 +1,1 @@
-set(sensor_cdf_MESSAGE_FILES "/home/maslab1/L-CDF/src/sensor_cdf/msg/Array.msg")
-set(sensor_cdf_SERVICE_FILES "")
+/home/guo/L-CDF/devel/.private/sensor_cdf/share/sensor_cdf/cmake/sensor_cdf-msg-extras.cmake

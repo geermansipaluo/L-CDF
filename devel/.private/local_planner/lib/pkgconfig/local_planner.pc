@@ -1,0 +1,8 @@
+prefix=/home/guo/L-CDF/devel/.private/local_planner
+
+Name: local_planner
+Description: Description of local_planner
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

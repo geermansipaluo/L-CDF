@@ -1,0 +1,4 @@
+jackal/jackal_control
+/home/guo/L-CDF/devel/.private/jackal_control/lib/pkgconfig/jackal_control.pc /home/guo/L-CDF/devel/lib/pkgconfig/jackal_control.pc
+/home/guo/L-CDF/devel/.private/jackal_control/share/jackal_control/cmake/jackal_controlConfig-version.cmake /home/guo/L-CDF/devel/share/jackal_control/cmake/jackal_controlConfig-version.cmake
+/home/guo/L-CDF/devel/.private/jackal_control/share/jackal_control/cmake/jackal_controlConfig.cmake /home/guo/L-CDF/devel/share/jackal_control/cmake/jackal_controlConfig.cmake

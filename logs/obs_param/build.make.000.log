@@ -1,0 +1,4 @@
+[ 33%] [32mBuilding CXX object CMakeFiles/obs_kf.dir/src/obs_kf.cpp.o[0m
+[ 66%] [32mBuilding CXX object CMakeFiles/obs_kf.dir/src/kalman.cpp.o[0m
+[100%] [32m[1mLinking CXX executable /home/guo/L-CDF/devel/.private/obs_param/lib/obs_param/obs_kf[0m
+[100%] Built target obs_kf

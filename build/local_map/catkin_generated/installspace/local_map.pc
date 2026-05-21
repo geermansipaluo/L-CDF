@@ -1,4 +1,4 @@
-prefix=/home/maslab1/L-CDF/install
+prefix=/home/guo/L-CDF/install
 
 Name: local_map
 Description: Description of local_map

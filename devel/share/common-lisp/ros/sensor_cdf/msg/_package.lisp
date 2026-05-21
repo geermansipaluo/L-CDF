@@ -1,7 +1,1 @@
-(cl:defpackage sensor_cdf-msg
-  (:use )
-  (:export
-   "<ARRAY>"
-   "ARRAY"
-  ))
-
+/home/guo/L-CDF/devel/.private/sensor_cdf/share/common-lisp/ros/sensor_cdf/msg/_package.lisp

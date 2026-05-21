@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "/home/maslab1/L-CDF/devel/lib/python3/dist-packages/sensor_cdf/msg/_Array.py"
-  "/home/maslab1/L-CDF/devel/lib/python3/dist-packages/sensor_cdf/msg/__init__.py"
+  "/home/guo/L-CDF/devel/.private/sensor_cdf/lib/python3/dist-packages/sensor_cdf/msg/_Array.py"
+  "/home/guo/L-CDF/devel/.private/sensor_cdf/lib/python3/dist-packages/sensor_cdf/msg/__init__.py"
   "CMakeFiles/sensor_cdf_generate_messages_py"
 )
 

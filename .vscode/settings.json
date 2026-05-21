@@ -10,5 +10,6 @@
         "/home/maslab1/workspace/ws_livox/devel/lib/python3/dist-packages",
         "/home/maslab1/catkin_ws/devel/lib/python3/dist-packages",
         "/opt/ros/noetic/lib/python3/dist-packages"
-    ]
+    ],
+    "ros.distro": "noetic"
 }

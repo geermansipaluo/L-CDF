@@ -1,0 +1,4 @@
+jackal/jackal_description
+/home/guo/L-CDF/devel/.private/jackal_description/lib/pkgconfig/jackal_description.pc /home/guo/L-CDF/devel/lib/pkgconfig/jackal_description.pc
+/home/guo/L-CDF/devel/.private/jackal_description/share/jackal_description/cmake/jackal_descriptionConfig.cmake /home/guo/L-CDF/devel/share/jackal_description/cmake/jackal_descriptionConfig.cmake
+/home/guo/L-CDF/devel/.private/jackal_description/share/jackal_description/cmake/jackal_descriptionConfig-version.cmake /home/guo/L-CDF/devel/share/jackal_description/cmake/jackal_descriptionConfig-version.cmake

@@ -1,5 +1,5 @@
 file(REMOVE_RECURSE
-  "/home/maslab1/L-CDF/devel/share/common-lisp/ros/sensor_cdf/msg/Array.lisp"
+  "/home/guo/L-CDF/devel/.private/sensor_cdf/share/common-lisp/ros/sensor_cdf/msg/Array.lisp"
   "CMakeFiles/sensor_cdf_generate_messages_lisp"
 )
 

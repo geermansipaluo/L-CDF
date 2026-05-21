@@ -1,8 +1,1 @@
-(cl:in-package sensor_cdf-msg)
-(cl:export '(DATA-VAL
-          DATA
-          ROWS-VAL
-          ROWS
-          COLS-VAL
-          COLS
-))
+/home/guo/L-CDF/devel/.private/sensor_cdf/share/common-lisp/ros/sensor_cdf/msg/_package_Array.lisp

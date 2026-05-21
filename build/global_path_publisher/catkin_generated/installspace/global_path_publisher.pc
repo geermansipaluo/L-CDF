@@ -1,4 +1,4 @@
-prefix=/home/maslab1/L-CDF/install
+prefix=/home/guo/L-CDF/install
 
 Name: global_path_publisher
 Description: Description of global_path_publisher

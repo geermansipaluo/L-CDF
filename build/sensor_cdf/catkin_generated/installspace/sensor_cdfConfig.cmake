@@ -67,14 +67,14 @@ set(sensor_cdf_CONFIG_INCLUDED TRUE)
 
 # set variables for source/devel/install prefixes
 if("FALSE" STREQUAL "TRUE")
-  set(sensor_cdf_SOURCE_PREFIX /home/maslab1/L-CDF/src/sensor_cdf)
-  set(sensor_cdf_DEVEL_PREFIX /home/maslab1/L-CDF/devel)
+  set(sensor_cdf_SOURCE_PREFIX /home/guo/L-CDF/src/sensor_cdf)
+  set(sensor_cdf_DEVEL_PREFIX /home/guo/L-CDF/devel/.private/sensor_cdf)
   set(sensor_cdf_INSTALL_PREFIX "")
   set(sensor_cdf_PREFIX ${sensor_cdf_DEVEL_PREFIX})
 else()
   set(sensor_cdf_SOURCE_PREFIX "")
   set(sensor_cdf_DEVEL_PREFIX "")
-  set(sensor_cdf_INSTALL_PREFIX /home/maslab1/L-CDF/install)
+  set(sensor_cdf_INSTALL_PREFIX /home/guo/L-CDF/install)
   set(sensor_cdf_PREFIX ${sensor_cdf_INSTALL_PREFIX})
 endif()
 
@@ -156,7 +156,7 @@ foreach(library ${libraries})
     set(lib_path "")
     set(lib "${library}-NOTFOUND")
     # since the path where the library is found is returned we have to iterate over the paths manually
-    foreach(path /home/maslab1/L-CDF/install/lib;/home/maslab1/workspace/ws_livox/devel/lib;/home/maslab1/catkin_ws/devel/lib;/opt/ros/noetic/lib)
+    foreach(path /home/guo/L-CDF/install/lib;/home/guo/L-CDF/devel/lib;/opt/ros/noetic/lib)
       find_library(lib ${library}
         PATHS ${path}
         NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)

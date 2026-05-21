@@ -1,0 +1,19 @@
+[  0%] Built target std_msgs_generate_messages_cpp
+[  0%] Built target std_msgs_generate_messages_lisp
+[  0%] Built target std_msgs_generate_messages_nodejs
+[  0%] Built target std_msgs_generate_messages_py
+[  0%] Built target std_msgs_generate_messages_eus
+[  0%] Built target _sensor_cdf_generate_messages_check_deps_Array
+[ 28%] [34m[1mGenerating EusLisp manifest code for sensor_cdf[0m
+[ 85%] [34m[1mGenerating Python from MSG sensor_cdf/Array[0m
+[ 85%] [34m[1mGenerating Javascript code from sensor_cdf/Array.msg[0m
+[ 85%] [34m[1mGenerating Lisp code from sensor_cdf/Array.msg[0m
+[ 85%] [34m[1mGenerating EusLisp code from sensor_cdf/Array.msg[0m
+[ 85%] [34m[1mGenerating C++ code from sensor_cdf/Array.msg[0m
+[ 85%] Built target sensor_cdf_generate_messages_lisp
+[ 85%] Built target sensor_cdf_generate_messages_nodejs
+[ 85%] Built target sensor_cdf_generate_messages_cpp
+[100%] [34m[1mGenerating Python msg __init__.py for sensor_cdf[0m
+[100%] Built target sensor_cdf_generate_messages_py
+[100%] Built target sensor_cdf_generate_messages_eus
+[100%] Built target sensor_cdf_generate_messages

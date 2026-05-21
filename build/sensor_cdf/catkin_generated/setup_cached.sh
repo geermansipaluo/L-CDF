@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+# generated from catkin/python/catkin/environment_cache.py
+
+# based on a snapshot of the environment before and after calling the setup script
+# it emulates the modifications of the setup script without recurring computations
+
+# new environment variables
+
+# modified environment variables
+export CMAKE_PREFIX_PATH="/home/guo/L-CDF/devel/.private/sensor_cdf:$CMAKE_PREFIX_PATH"
+export PWD='/home/guo/L-CDF/build/sensor_cdf'
+export ROSLISP_PACKAGE_DIRECTORIES="/home/guo/L-CDF/devel/.private/sensor_cdf/share/common-lisp:$ROSLISP_PACKAGE_DIRECTORIES"
+export ROS_PACKAGE_PATH="/home/guo/L-CDF/src/sensor_cdf:$ROS_PACKAGE_PATH"

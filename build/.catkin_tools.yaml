@@ -1,0 +1,6 @@
+devel_space: /home/guo/L-CDF/devel
+install: false
+install_space: /home/guo/L-CDF/install
+profile: default
+source_space: /home/guo/L-CDF/src
+workspace: /home/guo/L-CDF

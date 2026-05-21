@@ -1,5 +1,5 @@
 file(REMOVE_RECURSE
-  "/home/maslab1/L-CDF/devel/share/gennodejs/ros/sensor_cdf/msg/Array.js"
+  "/home/guo/L-CDF/devel/.private/sensor_cdf/share/gennodejs/ros/sensor_cdf/msg/Array.js"
   "CMakeFiles/sensor_cdf_generate_messages_nodejs"
 )
 

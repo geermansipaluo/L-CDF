@@ -1,0 +1,3 @@
+[ 50%] [32mBuilding CXX object CMakeFiles/local_map_pub.dir/src/local_map_pub.cpp.o[0m
+[100%] [32m[1mLinking CXX executable /home/guo/L-CDF/devel/.private/local_map/lib/local_map/local_map_pub[0m
+[100%] Built target local_map_pub

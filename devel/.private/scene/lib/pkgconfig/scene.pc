@@ -1,0 +1,8 @@
+prefix=/home/guo/L-CDF/devel/.private/scene
+
+Name: scene
+Description: Description of scene
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

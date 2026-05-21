@@ -1,1 +1,1 @@
-from ._Array import *
+/home/guo/L-CDF/devel/.private/sensor_cdf/lib/python3/dist-packages/sensor_cdf/msg/__init__.py

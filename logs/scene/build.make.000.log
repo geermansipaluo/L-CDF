@@ -1,0 +1,6 @@
+[ 25%] [32mBuilding CXX object CMakeFiles/movetest_node.dir/src/movetest.cpp.o[0m
+[ 50%] [32mBuilding CXX object CMakeFiles/getrobot_pose.dir/src/getrobot_pose.cpp.o[0m
+[ 75%] [32m[1mLinking CXX executable /home/guo/L-CDF/devel/.private/scene/lib/scene/movetest_node[0m
+[ 75%] Built target movetest_node
+[100%] [32m[1mLinking CXX executable /home/guo/L-CDF/devel/.private/scene/lib/scene/getrobot_pose[0m
+[100%] Built target getrobot_pose

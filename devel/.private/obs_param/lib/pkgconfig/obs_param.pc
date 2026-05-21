@@ -1,0 +1,8 @@
+prefix=/home/guo/L-CDF/devel/.private/obs_param
+
+Name: obs_param
+Description: Description of obs_param
+Version: 0.0.0
+Cflags: -I/home/guo/L-CDF/src/obs_param/include
+Libs: -L${prefix}/lib 
+Requires: 

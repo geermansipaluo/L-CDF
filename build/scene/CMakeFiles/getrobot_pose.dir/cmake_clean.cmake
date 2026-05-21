@@ -1,7 +1,8 @@
 file(REMOVE_RECURSE
-  "/home/maslab1/L-CDF/devel/lib/scene/getrobot_pose"
-  "/home/maslab1/L-CDF/devel/lib/scene/getrobot_pose.pdb"
+  "/home/guo/L-CDF/devel/.private/scene/lib/scene/getrobot_pose"
+  "/home/guo/L-CDF/devel/.private/scene/lib/scene/getrobot_pose.pdb"
   "CMakeFiles/getrobot_pose.dir/src/getrobot_pose.cpp.o"
+  "CMakeFiles/getrobot_pose.dir/src/getrobot_pose.cpp.o.d"
 )
 
 # Per-language clean rules from dependency scanning.

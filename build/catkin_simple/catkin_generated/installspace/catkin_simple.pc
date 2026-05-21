@@ -1,4 +1,4 @@
-prefix=/home/maslab1/L-CDF/install
+prefix=/home/guo/L-CDF/install
 
 Name: catkin_simple
 Description: Description of catkin_simple
