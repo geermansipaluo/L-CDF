@@ -33,7 +33,10 @@
     <node name="update_state" pkg="sensor_cdf" type="update_state.py"/>
     <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py"/>
     <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py"/>
-    <node name="convert_pointcloud2d" pkg="sensor_cdf" type="convert_pointcloud2d.py"/>
+    <node name="perfect_lidar_bridge" pkg="sensor_cdf" type="perfect_lidar_bridge.py" output="screen">
+        <param name="num_rays" value="512" /> <param name="max_range" value="3.0" />
+    </node>
+    <!-- <node name="convert_pointcloud2d" pkg="sensor_cdf" type="convert_pointcloud2d.py"/> -->
     <!-- <node name="run_cdf_test" pkg="obstacle_based_cdf" type="run_cdf_test.py" output="screen"/>
     <node name="update_state" pkg="obstacle_based_cdf" type="update_state.py"/>
     <node name="goal_publisher" pkg="obstacle_based_cdf" type="goal_publisher.py"/>
