@@ -42,7 +42,7 @@ class GraphDataCollator:
             torch.tensor(np.array(u_control), dtype=torch.float32)
         )
 
-def load_data(dataset_path='/home/ubuntu/gxf/model/test_oneenv_u.npz'):
+def load_data(dataset_path='/home/ubuntu/gxf/model/dateset.npz'):
     data = np.load(dataset_path, allow_pickle=True)
     X = data['X']
     y = data['y']
