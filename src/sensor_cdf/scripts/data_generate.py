@@ -245,7 +245,7 @@ def generate_random_environment(r_ego):
     return jnp.array(all_C), jnp.array(all_d), jnp.array(all_v), my_target
 
 # =========================================================================
-# 4. 专家数据压缩落盘系统
+# 4. 专家数据对齐打包压缩落盘函数
 # =========================================================================
 def save_expert_dataset(X_list, y_list, z_list, filename="dataset.npz"):
     X_array = np.array(X_list, dtype=np.float32)
@@ -257,207 +257,161 @@ def save_expert_dataset(X_list, y_list, z_list, filename="dataset.npz"):
     avoid_frames = total_frames - empty_frames
     
     print("\n" + "="*60)
-    print("💾 [DensityNet 高保真无污染专家数据集成功落盘]")
-    print(f" -> 状态特征 X 矩阵形状: {X_array.shape}")
-    print(f" -> 监督标签 y 矩阵形状: {y_array.shape}")
-    print(f" -> 变长图点云 z 序列长度: {len(z_array)}")
-    print(f"📊 [数据集安全审计] 本轮总记录帧数: {total_frames}")
-    print(f"    |-- 100%纯净避障高价值帧: {avoid_frames} 帧")
-    print(f"    |-- 15%抽样自由巡航负样本: {empty_frames} 帧")
-    print(f"✅ 审计结果：全周期硬碰撞发生率 0.00%！剔除潜在绝境因果污染链。")
-    print(f"🎉 数据集已安全保存至: {filename}")
+    print(f"💾 [数据流水线落盘成功] -> 已达成目标容量！")
+    print(f" -> 最终状态特征 X 张量形状: {X_array.shape}")
+    print(f" -> 最终监督标签 y 张量形状: {y_array.shape}")
+    print(f" -> 最终变长点云 z 序列长度: {len(z_array)}")
+    print(f"📊 [数据集成分最终审计] 总记录帧数: {total_frames}")
+    print(f"    |-- 高价值连续避障动作帧: {avoid_frames} 帧 ({avoid_frames/total_frames*100:.1f}%)")
+    print(f"    |-- 平衡下采样自由巡航帧: {empty_frames} 帧 ({empty_frames/total_frames*100:.1f}%)")
+    print(f"🎉 恭喜！最纯净、无碰撞污染的图深度学习专家训练集已打包就绪: {filename}")
     print("="*60 + "\n")
 
 # =========================================================================
-# 5. 自动化闭环控制仿真循环
+# 5. 自动化无限场景闭环控制流水线
 # =========================================================================
 if __name__ == '__main__':
     R_EGO = 0.31  
+    
+    # 🔴【核心配置】设定你的目标数据框数阈值（例如收集到 25000 帧完美专家动作后自动停止）
+    TARGET_DATA_LENGTH = 25000 
+    
+    # 建立外层全局大池子
+    X_all = []
+    y_all = []
+    z_all = []
 
-    all_C, all_d, all_v, my_target = generate_random_environment(R_EGO)
-    
-    ego_state = jnp.array([0.0, 0.0, 0.0])          
-    dt = 0.1                                        
-    total_steps = 1800                               
-    L = 0.15                                        
-
-    ego_hist = []
-    obs_hist = [] 
-    X_collection, y_collection, z_collection = [], [], []
-    
-    static_collisions = []
-    dynamic_collisions = []
-    
-    # 🔴【核心规则：引入全生命周期一票否决熔断锁】
-    has_collision_occurred = False
+    # 统计核心指标
+    total_episodes_run = 0
+    successful_episodes = 0
+    discarded_episodes = 0
 
     planner = DynamicEnvCDFPlanner()
 
-    print("⏳ 正在进行 XLA 全局算子融合编译...")
-    dummy_p = jnp.array([0.0, 0.0])
-    dummy_nom = jnp.array([0.0, 0.0])
-    _, _, _ = planner.solve_agent_qp(dummy_p, dummy_nom, all_C, all_d, all_v, my_target, R_EGO)
-    _, _ = simulate_lidar_local_raw(ego_state, all_C, all_d) 
-    print("✨ 编译成功！进入高保真安全策略评估...")
+    # 执行冷启动一次性基础编译
+    print("⏳ 正在进行 XLA 全局算子融合一次性冷启动编译...")
+    _all_C, _all_d, _all_v, _my_target = generate_random_environment(R_EGO)
+    _dummy_ego = jnp.array([0.0, 0.0, 0.0])
+    _dummy_p = jnp.array([0.0, 0.0])
+    _dummy_nom = jnp.array([0.0, 0.0])
+    _, _, _ = planner.solve_agent_qp(_dummy_p, _dummy_nom, _all_C, _all_d, _all_v, _my_target, R_EGO)
+    _, _ = simulate_lidar_local_raw(_dummy_ego, _all_C, _all_d) 
+    print("✨ 算子图编译成功！进入无限大批次自动化采集流...\n")
 
-    for step in range(total_steps):
-        ego_hist.append(ego_state)
-        obs_hist.append(np.array(all_d)) 
-
-        x, y, theta = float(ego_state[0]), float(ego_state[1]), float(ego_state[2])
-
-        # --- 实时物理冲突检测与审计 ---
-        for i in range(all_C.shape[0]):
-            a_obs, b_obs, th_obs, n_obs = all_C[i]
-            x_c, y_c = all_d[i, 0], all_d[i, 1]
-            
-            dx_c = x - x_c
-            dy_c = y - y_c
-            x_rot_c = dx_c * np.cos(th_obs) + dy_c * np.sin(th_obs)
-            y_rot_c = -dx_c * np.sin(th_obs) + dy_c * np.cos(th_obs)
-            
-            ellipse_val_c = (abs(x_rot_c) / (a_obs + R_EGO))**n_obs + (abs(y_rot_c) / (b_obs + R_EGO))**n_obs
-            if ellipse_val_c <= 1.0:
-                # 🔴 只要有任何一帧越界，本轮安全锁立刻熔断
-                has_collision_occurred = True
-                is_mov = np.linalg.norm(np.array(all_v[i])) > 1e-4
-                if is_mov:
-                    dynamic_collisions.append([x, y])
-                else:
-                    static_collisions.append([x, y])
-
-        # --- 局部感知获取与不规则裁剪 (z) ---
-        local_pc_all, min_t = simulate_lidar_local_raw(ego_state, all_C, all_d)
-        valid_mask = np.array(min_t < 2.99)
-        current_pc_local = np.array(local_pc_all)[valid_mask] 
-
-        # --- 控制引导计算 ---
-        ego_p = jnp.array([x + L * jnp.cos(theta), y + L * jnp.sin(theta)])
-        target_vector = my_target - ego_p
-        dist_to_goal = jnp.linalg.norm(target_vector)
-        ego_u_nom = jnp.where(dist_to_goal > 0.1, 0.5 * target_vector / (dist_to_goal + 1e-6), jnp.zeros(2))
-
-        # --- 求解最优控制指令 ---
-        u_opt, rho_val, grad_rho = planner.solve_agent_qp(
-            ego_p, ego_u_nom, all_C, all_d, all_v, my_target, R_EGO
-        )
-
-        v = u_opt[0] * jnp.cos(theta) + u_opt[1] * jnp.sin(theta)
-        omega = (-u_opt[0] * jnp.sin(theta) + u_opt[1] * jnp.cos(theta)) / L
-
-        # --- 特征矩阵 X 组装 ---
-        angle_to_target = jnp.arctan2(my_target[1] - y, my_target[0] - x)
-        yaw_err = angle_to_target - theta
-        cos_yaw_err = jnp.cos(yaw_err)
-        sin_yaw_err = jnp.sin(yaw_err)
+    # 🔴【外层流水线死循环】直到大池子数据长度达标才恩准退出
+    while len(X_all) < TARGET_DATA_LENGTH:
+        total_episodes_run += 1
         
-        X_step = np.array([x, y, theta, float(my_target[0]), float(my_target[1]), float(cos_yaw_err), float(sin_yaw_err)])
-        y_step = np.array([float(v), float(omega), float(rho_val), float(grad_rho[0]), float(grad_rho[1])])
+        # 每一轮自动刷新未知的宇宙环境
+        all_C, all_d, all_v, my_target = generate_random_environment(R_EGO)
         
-        is_empty = (len(current_pc_local) == 0)
-        should_record = True
-        if is_empty:
-            should_record = (np.random.rand() < 0.15)
+        ego_state = jnp.array([0.0, 0.0, 0.0])          
+        dt = 0.1                                        
+        total_steps = 1800                               
+        L = 0.15                                        
+
+        # 开辟本轮独立局部缓存舱（防止绝境断层污染大池子）
+        X_episode = []
+        y_episode = []
+        z_episode = []
+        
+        has_collision_occurred = False
+
+        # 内部时空步进闭环仿真
+        for step in range(total_steps):
+            x, y, theta = float(ego_state[0]), float(ego_state[1]), float(ego_state[2])
+
+            # --- 1. 超椭圆膨胀硬碰撞在线审计 ---
+            for i in range(all_C.shape[0]):
+                a_obs, b_obs, th_obs, n_obs = all_C[i]
+                x_c, y_c = all_d[i, 0], all_d[i, 1]
+                
+                dx_c = x - x_c
+                dy_c = y - y_c
+                x_rot_c = dx_c * np.cos(th_obs) + dy_c * np.sin(th_obs)
+                y_rot_c = -dx_c * np.sin(th_obs) + dy_c * np.cos(th_obs)
+                
+                ellipse_val_c = (abs(x_rot_c) / (a_obs + R_EGO))**n_obs + (abs(y_rot_c) / (b_obs + R_EGO))**n_obs
+                if ellipse_val_c <= 1.0:
+                    has_collision_occurred = True
+                    break
             
-        if should_record:
-            X_collection.append(X_step)
-            y_collection.append(y_step)
-            z_collection.append(current_pc_local) 
+            if has_collision_occurred:
+                break # 一旦撞墙立刻熔断终止当前 Episode，交由外层执行无情全额销毁
 
-        # --- 动力学更新 ---
-        new_x = x + v * jnp.cos(theta) * dt
-        new_y = y + v * jnp.sin(theta) * dt
-        new_theta = theta + omega * dt
-        ego_state = jnp.array([new_x, new_y, new_theta])
-        all_d = all_d + all_v * dt
+            # --- 2. 局部感知变长不规则裁剪 (z) ---
+            local_pc_all, min_t = simulate_lidar_local_raw(ego_state, all_C, all_d)
+            valid_mask = np.array(min_t < 2.99)
+            current_pc_local = np.array(local_pc_all)[valid_mask] 
 
-        if jnp.linalg.norm(my_target - ego_state[:2]) < 0.2:
-            print(f"🎉 差分小车成功安全突围多体冲突区！")
-            break
+            # --- 3. 差分最优控制指令求解 ---
+            ego_p = jnp.array([x + L * jnp.cos(theta), y + L * jnp.sin(theta)])
+            target_vector = my_target - ego_p
+            dist_to_goal = jnp.linalg.norm(target_vector)
+            ego_u_nom = jnp.where(dist_to_goal > 0.1, 0.5 * target_vector / (dist_to_goal + 1e-6), jnp.zeros(2))
 
-    # 🔴【核心修正：落盘前置强行拦截洗数】
-    if has_collision_occurred:
-        print("\n" + "⚠️"*30)
-        print("🛑 [警告] 本轮轨迹遭遇多体物理冲突（硬擦碰报错）！")
-        print(" -> 为防止‘绝境决策因果断层’毒化网络，数据净化系统已自动销毁本轮全部缓存帧！")
-        print(" -> 本次运行不生成、不更新 dataset.npz 文件。")
-        print("⚠️"*30 + "\n")
-    else:
-        # 只有 100% 完美的纯净演示数据，才允许重组落盘
-        save_expert_dataset(X_collection, y_collection, z_collection, filename="dataset.npz")
+            u_opt, rho_val, grad_rho = planner.solve_agent_qp(
+                ego_p, ego_u_nom, all_C, all_d, all_v, my_target, R_EGO
+            )
+
+            v = u_opt[0] * jnp.cos(theta) + u_opt[1] * jnp.sin(theta)
+            omega = (-u_opt[0] * jnp.sin(theta) + u_opt[1] * jnp.cos(theta)) / L
+
+            # --- 4. 特征矩阵 X 与监督标签 y 组装 ---
+            angle_to_target = jnp.arctan2(my_target[1] - y, my_target[0] - x)
+            yaw_err = angle_to_target - theta
+            cos_yaw_err = jnp.cos(yaw_err)
+            sin_yaw_err = jnp.sin(yaw_err)
+            
+            X_step = np.array([x, y, theta, float(my_target[0]), float(my_target[1]), float(cos_yaw_err), float(sin_yaw_err)])
+            y_step = np.array([float(v), float(omega), float(rho_val), float(grad_rho[0]), float(grad_rho[1])])
+            
+            # --- 5. 自由巡航帧负样本 15% 在线比例调和平衡阀 ---
+            is_empty = (len(current_pc_local) == 0)
+            should_record = True
+            if is_empty:
+                should_record = (np.random.rand() < 0.15)
+                
+            if should_record:
+                X_episode.append(X_step)
+                y_episode.append(y_step)
+                z_episode.append(current_pc_local) 
+
+            # --- 6. 物理系统状态前向积分积分演进 ---
+            new_x = x + v * jnp.cos(theta) * dt
+            new_y = y + v * jnp.sin(theta) * dt
+            new_theta = theta + omega * dt
+            ego_state = jnp.array([new_x, new_y, new_theta])
+            all_d = all_d + all_v * dt
+
+            # 收敛成功判定
+            if jnp.linalg.norm(my_target - ego_state[:2]) < 0.2:
+                break
+
+        # 🔴【外层净化过滤器：一票否决控制核】
+        if has_collision_occurred:
+            discarded_episodes += 1
+            # 绝不让绝境因果污染全局！局部数据直接出局丢弃（不加入大池子）
+        else:
+            successful_episodes += 1
+            # 只有 100% 完美的历史演示才被允许合并
+            X_all.extend(X_episode)
+            y_all.extend(y_episode)
+            z_all.extend(z_episode)
+            
+            # 实时无死角进度报告打印
+            print(f"📊 进度: {len(X_all)}/{TARGET_DATA_LENGTH} 帧已捕获 "
+                  f"({len(X_all)/TARGET_DATA_LENGTH*100:.1f}%) | "
+                  f"累计战局数: {total_episodes_run} [完美突围: {successful_episodes} | 冲突熔断: {discarded_episodes}]")
+
+    # 🔴 收集圆满达成，裁剪或直接高压缩落盘
+    X_all = X_all[:TARGET_DATA_LENGTH]
+    y_all = y_all[:TARGET_DATA_LENGTH]
+    z_all = z_all[:TARGET_DATA_LENGTH]
+    save_expert_dataset(X_all, y_all, z_all, filename="dataset.npz")
+
 
     # =========================================================================
-    # 6. 顶级学术期刊级超椭圆渲染验证 
+    # 6. 渲染多体演进与顶级学术期刊级超椭圆验证（根据您的明确要求，已彻底注释移除）
     # =========================================================================
-    ego_hist_np = np.array(ego_hist)
-    obs_hist_np = np.array(obs_hist) 
-
-    plt.rcParams['font.family'] = 'serif'
-    plt.rcParams['font.serif'] = ['Times New Roman'] + plt.rcParams['font.serif']
-
-    fig, ax = plt.subplots(figsize=(11, 5))
-    ax.plot(ego_hist_np[:, 0], ego_hist_np[:, 1], 'b-', linewidth=2.5, label='Robot path', zorder=4)
-    
-    num_obs = all_C.shape[0]
-    for i in range(num_obs):
-        a, b, theta, n = all_C[i]
-        start_center = obs_hist_np[0, i]
-        final_center = obs_hist_np[-1, i]
-        
-        t_samples = np.linspace(0, 2*np.pi, 300)
-        cos_s = np.cos(t_samples); sin_s = np.sin(t_samples)
-        x_loc = np.sign(cos_s) * a * (np.abs(cos_s) ** (2.0 / n))
-        y_loc = np.sign(sin_s) * b * (np.abs(sin_s) ** (2.0 / n))
-        cos_th, sin_th = np.cos(theta), np.sin(theta)
-        
-        x_w0 = start_center[0] + x_loc * cos_th - y_loc * sin_th
-        y_w0 = start_center[1] + x_loc * sin_th + y_loc * cos_th
-        ax.fill(x_w0, y_w0, color='gray', alpha=0.12, zorder=2)
-        
-        x_wf = final_center[0] + x_loc * cos_th - y_loc * sin_th
-        y_wf = final_center[1] + x_loc * sin_th + y_loc * cos_th
-        is_mov = np.linalg.norm(np.array(all_v[i])) > 1e-4
-        
-        obs_color = 'darkorange' if is_mov else 'dimgray'
-        obs_label = 'Moving obstacle' if is_mov else 'Static obstacle'
-        
-        ax.plot(x_wf, y_wf, color=obs_color, linewidth=1.5, zorder=3)
-        ax.fill(x_wf, y_wf, color=obs_color, alpha=0.35, zorder=2, label=obs_label)
-        
-        if is_mov:
-            ax.plot(obs_hist_np[:, i, 0], obs_hist_np[:, i, 1], '--', color='chocolate', linewidth=1.2, label='Obstacle trajectory')
-
-    # 点云投射绘制
-    X_collection_np = np.array(X_collection)
-    for idx in range(0, len(z_collection), 2):
-        ego_x, ego_y, ego_th = X_collection_np[idx, 0], X_collection_np[idx, 1], X_collection_np[idx, 2]
-        pts_l = z_collection[idx]
-        if len(pts_l) > 0: 
-            cos_th, sin_th = np.cos(ego_th), np.sin(ego_th)
-            pts_w_x = ego_x + pts_l[:, 0] * cos_th - pts_l[:, 1] * sin_th
-            pts_w_y = ego_y + pts_l[:, 0] * sin_th + pts_l[:, 1] * cos_th
-            ax.scatter(pts_w_x, pts_w_y, color='crimson', s=1.5, alpha=0.25, zorder=1, label='Lidar point cloud')
-
-    if len(static_collisions) > 0:
-        sc_np = np.array(static_collisions)
-        ax.scatter(sc_np[:, 0], sc_np[:, 1], color='black', marker='*', s=90, label='Static collision point', zorder=6)
-    if len(dynamic_collisions) > 0:
-        dc_np = np.array(dynamic_collisions)
-        ax.scatter(dc_np[:, 0], dc_np[:, 1], color='red', marker='x', s=60, label='Dynamic collision point', zorder=6)
-
-    ax.scatter(0.0, 0.0, color='blue', marker='o', s=100, label='Start', zorder=5)
-    ax.scatter(my_target[0], my_target[1], color='darkgreen', marker='X', s=150, label='Target', zorder=5)
-
-    handles, labels = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys(), loc='upper right', shadow=True, framealpha=0.9, fontsize=9)
-
-    ax.axis('equal')
-    ax.set_xlim(-0.5, 14.5)
-    ax.set_ylim(-4.5, 4.5)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.grid(False)
-    ax.set_title("Densitynet balanced training dataset diagnosis plot", fontsize=11, fontweight='bold')
-    plt.savefig('dateset_gen.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    # 画面渲染已被物理阻断，保障流水线在后台以全速、无 GUI 停滞、100% 的极高效率疯狂生成专家行为。
