@@ -16,7 +16,7 @@
     <!-- <node pkg="tf" type="static_transform_publisher" name="world_odom_broadcaster" args="0 0 0 0 0 0 1 world odom 100" />  -->
 
     <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
-        args="-urdf -model jackal -param robot_description -x -10 -y 0.1 -z 1.0" />
+        args="-urdf -model jackal -param robot_description -x -5 -y 0.1 -z 1.0" />
 
     <include file="$(find local_map)/launch/for_simulation.launch" />
 
@@ -29,7 +29,7 @@
 
     <!-- <node name="run_cdf" pkg="sensor_cdf" type="run_cdf.py" output="screen"/> -->
     <!-- <node name="run_cdf_test" pkg="sensor_cdf" type="run_cdf_test.py" output="screen"/> -->
-    <node name="lidar_cdf_test" pkg="sensor_cdf" type="lidar_cdf_test.py" output="screen"/>
+    <node name="lidar_u_test" pkg="sensor_cdf" type="lidar_u_test.py" output="screen"/>
     <node name="update_state" pkg="sensor_cdf" type="update_state.py"/>
     <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py"/>
     <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py"/>
