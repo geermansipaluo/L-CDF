@@ -79,18 +79,23 @@ class GeometricEncoder(nn.Module):
         x_global = global_max_pool(x_multi, batch_idx)  
         return x_global
 
-class UNet(nn.Module):
+class DensityNet(nn.Module):
     """
-    DensityNet 核心纯端到端控制策略网络 (UNet)
-    输入：机器人位置状态 (2维) + 激光点云图 (PyG Data)
-    输出：机器人动作空间连续控制指令 [v, w] (线速度与角速度)
+    DensityNet 核心纯端到端控制策略网络 (双头输出版)
+    输入：
+        state: 机器人局部相对状态特征 [Batch, state_dim=4] 
+               -> (target_local_x, target_local_y, cos_yaw_err, sin_yaw_err)
+        points: 局部激光点云图 (PyG Data 对象)
+    输出：
+        action: 连续控制指令 [Batch, 2] -> (v, omega)
+        risk:   解耦的纯几何风险标量 [Batch, 1] -> \sigma \in [0, 1] (逼近 1.0 - \psi)
     """
-    def __init__(self, state_dim=2, hidden_dim=256):
+    def __init__(self, state_dim=4, hidden_dim=256):
         super().__init__()
-        # 点云几何图分支编码器
+        # 点云几何图分支编码器 (保持高效的多尺度特征拓扑提取)
         self.geo_encoder = GeometricEncoder(hidden_dim=hidden_dim, k=10)
         
-        # 机器人状态分支编码器
+        # 机器人纯相对状态分支编码器 (接收移除绝对坐标污染后的 4 维纯净输入)
         self.state_encoder = nn.Sequential(
             nn.Linear(state_dim, hidden_dim*2),
             nn.LayerNorm(hidden_dim*2),
@@ -100,7 +105,7 @@ class UNet(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # 跨模态特征融合层
+        # 跨模态高维特征融合层
         self.fusion = nn.Sequential(
             nn.Linear(hidden_dim*2, hidden_dim*2),
             nn.LayerNorm(hidden_dim*2),
@@ -111,11 +116,20 @@ class UNet(nn.Module):
             nn.GELU()
         )
         
-        # 控制策略输出头 (直出 2 维动作量)
-        self.head = nn.Sequential(
+        # 🔥【头分支 1】控制策略输出头 (直出 2 维连续动作量：线速度与角速度)
+        self.action_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim//2),
             nn.SiLU(),
             nn.Linear(hidden_dim//2, 2)
+        )
+
+        # 🔥【头分支 2】物理信息指导的几何风险预测头 (输出 1 维风险标量 \sigma)
+        # 关键改动：末尾采用 nn.Sigmoid() 严格限制输出范围在 [0, 1]，完美对应 1.0 - \psi 靶点
+        self.risk_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim//2, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, state, points):
@@ -123,8 +137,11 @@ class UNet(nn.Module):
         geo_feat = self.geo_encoder(points)
         state_feat = self.state_encoder(state)
         
-        # 2. 拼接空间特征与动态状态并进行融合
+        # 2. 拼接空间特征与动态状态并进行全连接深度融合
         fused = self.fusion(torch.cat([geo_feat, state_feat], dim=1))
         
-        # 3. 输出端到端控制量 u = [v, w] (线速度与角速度)
-        return self.head(fused)
+        # 3. 双头解耦前向传播输出
+        action = self.action_head(fused)  # 控制量 [batch, 2] -> (v, omega)
+        risk = self.risk_head(fused)      # 风险度 [batch, 1] -> \sigma \in [0, 1]
+        
+        return action, risk

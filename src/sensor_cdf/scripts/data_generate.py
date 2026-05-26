@@ -44,7 +44,10 @@ def obstacle_bump_field(x, C_obs, d_obs, r_ego):
     return smooth_bump(c_val, b_val)
 
 @jit
-def get_local_density(my_state, my_target, all_C, all_d, r_ego, real_ego_center):
+def get_local_density_and_psi(my_state, my_target, all_C, all_d, r_ego, real_ego_center):
+    """
+    计算复合密度函数，同时剥离并返回分布更稳定的空间安全连通域场强值 psi
+    """
     LIDAR_RANGE_SQ = 3.0 ** 2
 
     dist_sq = jnp.sum((all_d - real_ego_center)**2, axis=1)
@@ -55,14 +58,16 @@ def get_local_density(my_state, my_target, all_C, all_d, r_ego, real_ego_center)
     
     psi_array = jax.vmap(single_obs_density)(all_C, all_d)
     psi_array = jnp.where(in_range, psi_array, 1.0)
-    psi_static = jnp.prod(psi_array)
+    
+    # 🔴 剥离提取这 512 扫描空域构成的整体大空间连通域特征 psi (在 0 到 1 之间均匀分布)
+    psi_curr = jnp.prod(psi_array)
     
     dist_target_sq = jnp.sum((my_state - my_target)**2)
     V_x = dist_target_sq
     alpha = 0.5
     
-    rho = psi_static / (V_x ** alpha + 1e-6)
-    return rho
+    rho = psi_curr / (V_x ** alpha + 1e-6)
+    return rho, psi_curr
 
 @jit
 def simulate_lidar_local_raw(ego_state, all_C, all_d):
@@ -112,11 +117,14 @@ class DynamicEnvCDFPlanner:
         inv_eps = 1.0 / epsilon
         real_ego_center = ego_state[:2]
 
+        # 封装底层函数接口
         def density_wrapper_ego(pos_ego):
-            return get_local_density(pos_ego, my_target, all_C, all_d, r_ego, real_ego_center)
+            rho, _ = get_local_density_and_psi(pos_ego, my_target, all_C, all_d, r_ego, real_ego_center)
+            return rho
             
         def density_wrapper_obs(pure_obs_d):
-            return get_local_density(ego_state, my_target, all_C, pure_obs_d, r_ego, real_ego_center)
+            rho, _ = get_local_density_and_psi(ego_state, my_target, all_C, pure_obs_d, r_ego, real_ego_center)
+            return rho
 
         grad_self = jax.grad(density_wrapper_ego)(ego_state)
         grad_obs = jax.grad(density_wrapper_obs)(all_d) 
@@ -141,9 +149,9 @@ class DynamicEnvCDFPlanner:
         W_mat = jnp.linalg.inv(V_mat)
         w1 = W_mat[0, :]; w2 = W_mat[1, :]
         
-        rho_curr = density_wrapper_ego(ego_state)
-        rho_z1 = density_wrapper_ego(z1_pos)
-        rho_z2 = density_wrapper_ego(z2_pos)
+        rho_curr, psi_curr = get_local_density_and_psi(ego_state, my_target, all_C, all_d, r_ego, real_ego_center)
+        rho_z1, _ = get_local_density_and_psi(z1_pos, my_target, all_C, all_d, r_ego, real_ego_center)
+        rho_z2, _ = get_local_density_and_psi(z2_pos, my_target, all_C, all_d, r_ego, real_ego_center)
 
         dim_total = 6
         lambda_smooth = 15.0
@@ -178,7 +186,8 @@ class DynamicEnvCDFPlanner:
         solver = JaxProxQP(qp, settings)
         u_opt = solver.solve().x[:2]
         
-        return u_opt, rho_curr, grad_self
+        # 🟢 依然用 rho 解算控制，但向外吐出极其稳定的 psi_curr 供保存标签提取
+        return u_opt, psi_curr
 
 # =========================================================================
 # 3. 物理级随机拓扑环境生成算子
@@ -186,7 +195,6 @@ class DynamicEnvCDFPlanner:
 def generate_random_environment(r_ego):
     target_x = np.random.uniform(10.0, 13.0)
     my_target = np.array([target_x, 0.0])
-    
     num_obstacles = np.random.randint(2, 7) 
     
     types = []
@@ -213,7 +221,6 @@ def generate_random_environment(r_ego):
             
             x_c = np.random.uniform(2.0, target_x - 2.0)
             y_c = np.random.uniform(-4.0, 4.0)
-            
             r_bound = np.sqrt(a**2 + b**2)
             
             if np.sqrt(x_c**2 + y_c**2) < (r_bound + r_ego + 0.6): continue
@@ -245,7 +252,7 @@ def generate_random_environment(r_ego):
     return jnp.array(all_C), jnp.array(all_d), jnp.array(all_v), my_target
 
 # =========================================================================
-# 4. 专家数据对齐打包压缩落盘函数
+# 4. 专家数据对齐压缩落盘固化函数（真正的写入文件系统！）
 # =========================================================================
 def save_expert_dataset(X_list, y_list, z_list, filename="dataset.npz"):
     X_array = np.array(X_list, dtype=np.float32)
@@ -257,14 +264,18 @@ def save_expert_dataset(X_list, y_list, z_list, filename="dataset.npz"):
     avoid_frames = total_frames - empty_frames
     
     print("\n" + "="*60)
-    print(f"💾 [数据流水线落盘成功] -> 已达成目标容量！")
-    print(f" -> 最终状态特征 X 张量形状: {X_array.shape}")
-    print(f" -> 最终监督标签 y 张量形状: {y_array.shape}")
+    print(f"💾 [数据流水线落盘系统启动] -> 正在向硬盘写入二进制压缩文件...")
+    
+    # 🔥 核心固化：调用大一统的高压缩落盘命令，将完全对齐的数据流固化在 dataset.npz 中
+    np.savez_compressed(filename, X=X_array, y=y_array, z=z_array)
+    
+    print(f" -> 最终状态特征 X 张量形状: {X_array.shape} | [x, y, theta, gx, gy, cos_err, sin_err]")
+    print(f" -> 最终监督标签 y 张量形状: {y_array.shape} | [v, omega, psi]")
     print(f" -> 最终变长点云 z 序列长度: {len(z_array)}")
     print(f"📊 [数据集成分最终审计] 总记录帧数: {total_frames}")
     print(f"    |-- 高价值连续避障动作帧: {avoid_frames} 帧 ({avoid_frames/total_frames*100:.1f}%)")
     print(f"    |-- 平衡下采样自由巡航帧: {empty_frames} 帧 ({empty_frames/total_frames*100:.1f}%)")
-    print(f"🎉 恭喜！最纯净、无碰撞污染的图深度学习专家训练集已打包就绪: {filename}")
+    print(f"🎉 成功落盘！纯净有界（psi位于0-1）的多任务图神经网络专家集已安全存储：{filename}")
     print("="*60 + "\n")
 
 # =========================================================================
@@ -273,36 +284,25 @@ def save_expert_dataset(X_list, y_list, z_list, filename="dataset.npz"):
 if __name__ == '__main__':
     R_EGO = 0.31  
     
-    # 🔴【核心配置】设定你的目标数据框数阈值（例如收集到 25000 帧完美专家动作后自动停止）
-    TARGET_DATA_LENGTH = 25000 
+    # 🔴 根据学术论文大样本量标准，设定为 10 万帧高保真对齐动作
+    TARGET_DATA_LENGTH = 100000 
     
-    # 建立外层全局大池子
-    X_all = []
-    y_all = []
-    z_all = []
-
-    # 统计核心指标
-    total_episodes_run = 0
-    successful_episodes = 0
-    discarded_episodes = 0
+    X_all, y_all, z_all = [], [], []
+    total_episodes_run, successful_episodes, discarded_episodes = 0, 0, 0
 
     planner = DynamicEnvCDFPlanner()
 
-    # 执行冷启动一次性基础编译
     print("⏳ 正在进行 XLA 全局算子融合一次性冷启动编译...")
     _all_C, _all_d, _all_v, _my_target = generate_random_environment(R_EGO)
     _dummy_ego = jnp.array([0.0, 0.0, 0.0])
     _dummy_p = jnp.array([0.0, 0.0])
     _dummy_nom = jnp.array([0.0, 0.0])
-    _, _, _ = planner.solve_agent_qp(_dummy_p, _dummy_nom, _all_C, _all_d, _all_v, _my_target, R_EGO)
+    _, _ = planner.solve_agent_qp(_dummy_p, _dummy_nom, _all_C, _all_d, _all_v, _my_target, R_EGO)
     _, _ = simulate_lidar_local_raw(_dummy_ego, _all_C, _all_d) 
-    print("✨ 算子图编译成功！进入无限大批次自动化采集流...\n")
+    print("✨ 算子图编译成功！进入大批次并行无图表静默加速采集...\n")
 
-    # 🔴【外层流水线死循环】直到大池子数据长度达标才恩准退出
     while len(X_all) < TARGET_DATA_LENGTH:
         total_episodes_run += 1
-        
-        # 每一轮自动刷新未知的宇宙环境
         all_C, all_d, all_v, my_target = generate_random_environment(R_EGO)
         
         ego_state = jnp.array([0.0, 0.0, 0.0])          
@@ -310,14 +310,9 @@ if __name__ == '__main__':
         total_steps = 1800                               
         L = 0.15                                        
 
-        # 开辟本轮独立局部缓存舱（防止绝境断层污染大池子）
-        X_episode = []
-        y_episode = []
-        z_episode = []
-        
+        X_episode, y_episode, z_episode = [], [], []
         has_collision_occurred = False
 
-        # 内部时空步进闭环仿真
         for step in range(total_steps):
             x, y, theta = float(ego_state[0]), float(ego_state[1]), float(ego_state[2])
 
@@ -337,36 +332,39 @@ if __name__ == '__main__':
                     break
             
             if has_collision_occurred:
-                break # 一旦撞墙立刻熔断终止当前 Episode，交由外层执行无情全额销毁
+                break 
 
             # --- 2. 局部感知变长不规则裁剪 (z) ---
             local_pc_all, min_t = simulate_lidar_local_raw(ego_state, all_C, all_d)
             valid_mask = np.array(min_t < 2.99)
             current_pc_local = np.array(local_pc_all)[valid_mask] 
 
-            # --- 3. 差分最优控制指令求解 ---
+            # --- 3. 最优指导控制解算 ---
             ego_p = jnp.array([x + L * jnp.cos(theta), y + L * jnp.sin(theta)])
             target_vector = my_target - ego_p
             dist_to_goal = jnp.linalg.norm(target_vector)
             ego_u_nom = jnp.where(dist_to_goal > 0.1, 0.5 * target_vector / (dist_to_goal + 1e-6), jnp.zeros(2))
 
-            u_opt, rho_val, grad_rho = planner.solve_agent_qp(
+            # 内部算子返回 u 和 psi_curr 
+            u_opt, psi_curr_val = planner.solve_agent_qp(
                 ego_p, ego_u_nom, all_C, all_d, all_v, my_target, R_EGO
             )
 
             v = u_opt[0] * jnp.cos(theta) + u_opt[1] * jnp.sin(theta)
             omega = (-u_opt[0] * jnp.sin(theta) + u_opt[1] * jnp.cos(theta)) / L
 
-            # --- 4. 特征矩阵 X 与监督标签 y 组装 ---
+            # --- 4. 特征矩阵 X 与 新监督标签 y 组装 ---
             angle_to_target = jnp.arctan2(my_target[1] - y, my_target[0] - x)
             yaw_err = angle_to_target - theta
             cos_yaw_err = jnp.cos(yaw_err)
             sin_yaw_err = jnp.sin(yaw_err)
             
             X_step = np.array([x, y, theta, float(my_target[0]), float(my_target[1]), float(cos_yaw_err), float(sin_yaw_err)])
-            y_step = np.array([float(v), float(omega), float(rho_val), float(grad_rho[0]), float(grad_rho[1])])
             
-            # --- 5. 自由巡航帧负样本 15% 在线比例调和平衡阀 ---
+            # 🔴【核心修改点】标签 y 摒弃掉突变的 rho 和梯度，缩减并固定成极度规整的 3 维特征：[线速度, 角速度, 有界环境连通分量psi]
+            y_step = np.array([float(v), float(omega), float(psi_curr_val)])
+            
+            # --- 5. 巡航负样本 15% 在线调和平衡阀 ---
             is_empty = (len(current_pc_local) == 0)
             should_record = True
             if is_empty:
@@ -377,41 +375,33 @@ if __name__ == '__main__':
                 y_episode.append(y_step)
                 z_episode.append(current_pc_local) 
 
-            # --- 6. 物理系统状态前向积分积分演进 ---
+            # --- 6. 状态物理前向更新 ---
             new_x = x + v * jnp.cos(theta) * dt
             new_y = y + v * jnp.sin(theta) * dt
             new_theta = theta + omega * dt
             ego_state = jnp.array([new_x, new_y, new_theta])
             all_d = all_d + all_v * dt
 
-            # 收敛成功判定
             if jnp.linalg.norm(my_target - ego_state[:2]) < 0.2:
                 break
 
-        # 🔴【外层净化过滤器：一票否决控制核】
+        # 【一票否决洗数过滤器】
         if has_collision_occurred:
             discarded_episodes += 1
-            # 绝不让绝境因果污染全局！局部数据直接出局丢弃（不加入大池子）
         else:
             successful_episodes += 1
-            # 只有 100% 完美的历史演示才被允许合并
             X_all.extend(X_episode)
             y_all.extend(y_episode)
             z_all.extend(z_episode)
             
-            # 实时无死角进度报告打印
-            print(f"📊 进度: {len(X_all)}/{TARGET_DATA_LENGTH} 帧已捕获 "
+            print(f"📊 收集进度: {len(X_all)}/{TARGET_DATA_LENGTH} 帧已固化 "
                   f"({len(X_all)/TARGET_DATA_LENGTH*100:.1f}%) | "
-                  f"累计战局数: {total_episodes_run} [完美突围: {successful_episodes} | 冲突熔断: {discarded_episodes}]")
+                  f"战局统计: {total_episodes_run} [完美: {successful_episodes} | 冲突熔断: {discarded_episodes}]")
 
-    # 🔴 收集圆满达成，裁剪或直接高压缩落盘
+    # 裁剪落盘
     X_all = X_all[:TARGET_DATA_LENGTH]
     y_all = y_all[:TARGET_DATA_LENGTH]
     z_all = z_all[:TARGET_DATA_LENGTH]
+    
+    # 🔴 真正的落盘函数调用执行，将数据安全写进你的当前路径目录中！
     save_expert_dataset(X_all, y_all, z_all, filename="dataset.npz")
-
-
-    # =========================================================================
-    # 6. 渲染多体演进与顶级学术期刊级超椭圆验证（根据您的明确要求，已彻底注释移除）
-    # =========================================================================
-    # 画面渲染已被物理阻断，保障流水线在后台以全速、无 GUI 停滞、100% 的极高效率疯狂生成专家行为。
