@@ -181,20 +181,37 @@ def train_epoch(model, train_loader, optimizer, criterion_ctrl, saver, args, sch
             # 多任务损失函数多指标平衡计算
             # =========================================================================
             # --- 任务 1：控制动作仿真误差损失 (加持高价值避障非对称大增益) ---
-            loss_ctrl_raw = criterion_ctrl(pred_action, true_action)
-            action_deviation = torch.norm(true_action - nominal_action, dim=1, keepdim=True)
-            action_weight = torch.ones_like(action_deviation)
-            action_weight[action_deviation > 0.05] = 40.0  
-            loss_ctrl = torch.mean(loss_ctrl_raw * action_weight)
+            loss_ctrl = criterion_ctrl(pred_action, 10*true_action)
+            # action_deviation = torch.norm(true_action - nominal_action, dim=1, keepdim=True)
+            # action_weight = torch.ones_like(action_deviation)
+            # action_weight[action_deviation > 0.05] = 40.0  
+            # loss_ctrl = torch.mean(loss_ctrl * action_weight)
             
             # --- 任务 2：几何风险误差损失 (高强度危险边缘加权) ---
             loss_risk_raw = criterion_risk(pred_risk_curr, risk_target)
             risk_weight = torch.ones_like(risk_target)
-            risk_weight[risk_target > 0.02] = 80.0
+            risk_weight[risk_target > 0.2] = 10.0
             loss_risk = torch.mean(loss_risk_raw * risk_weight)
+
+            goal_local_pos = batch['goal'].x  
+            target_local_x = goal_local_pos[:, 0:1]
+            target_local_y = goal_local_pos[:, 1:2]
+            
+            # 2. 动态审计当前的相对距离
+            goal_dist_sq = target_local_x**2 + target_local_y**2 + 1e-6
+            goal_dist = torch.sqrt(goal_dist_sq)
+            
+            # 3. 施加硬核目标控制论状态缩闭环：
+            # 物理含义：如果距离目标极近（如 < 0.25m），网络预测的线速度 v 和角速度 w 必须平稳归零摆停！
+            # 利用平滑的连续边界权重激活：当距离大于 0.25m 时权重为 0，进入 0.25m 内时权重随逼近呈指数级暴涨
+            at_goal_mask = torch.where(goal_dist < 0.25, 1.0, 0.0)
+            
+            loss_goal_v = torch.mean((pred_v - 0.0)**2 * at_goal_mask)
+            loss_goal_w = torch.mean((pred_w - 0.0)**2 * at_goal_mask)
+            loss_goal = loss_goal_v + loss_goal_w * 2.0
             
             # 跨模态联合总全优化损失目标
-            loss = loss_ctrl + 10.0 * loss_risk + 20.0 * loss_physics
+            loss = loss_ctrl
         
         # 混合精度反向传播
         scaler.scale(loss).backward()

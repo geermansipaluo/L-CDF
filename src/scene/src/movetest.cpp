@@ -1,66 +1,64 @@
 #include <ros/ros.h>
-#include <chrono>
-#include <std_msgs/Bool.h>
-
+#include <visualization_msgs/MarkerArray.h>
+#include <visualization_msgs/Marker.h>
 #include "moving_cylinder.hpp"
 
-using namespace std;
+int main(int argc, char** argv) {
+    ros::init(argc, argv, "movetest_node");
+    ros::NodeHandle nh;
+    ros::NodeHandle private_nh("~");
 
-const uint8_t cylinder_num = 8;
-int MovingCylinder::id_ = 0;
+    // 声明可视化 Marker 发布器，以便在 Rviz 中实时肉眼观察往返效果
+    ros::Publisher marker_pub = nh.advertise<visualization_msgs::MarkerArray>("/visual_obstacles", 10);
 
-bool is_move = false;
+    // 实例化两个完全解耦的动态柱体
+    MovingCylinder obs1;
+    MovingCylinder obs2;
 
-void cmdCallback(const std_msgs::Bool::ConstPtr& cmd_move)
-{
-  is_move = cmd_move->data;
-}
+    // 🟢 载入障碍物 1 的物理常数（让它在 X=4.5m 处横向在 Y=-2.5m 到 Y=2.5m 之间疯狂往返移动拦截小车）
+    obs1.init(4.5, -2.0, 0.0,  0.0, 0.4,  4.0, 5.0,  -2.5, 2.5);
+    
+    // 🟢 载入障碍物 2 的物理常数（让它在 X=8.0m 处斜向在 Y=-1.5m 到 Y=1.5m 之间高频摆动）
+    obs2.init(8.0, 1.5, 0.0,   0.1, 0.5,  7.5, 8.5,  -1.5, 1.5);
 
-int main(int argc, char** argv)
-{
-  ros::init(argc, argv, "move_gazebo_model");
-  ros::NodeHandle n("~");
+    double frequency = 30.0; // 30Hz 高频物理引擎刷新率
+    ros::Rate rate(frequency);
+    double dt = 1.0 / frequency;
 
-  ros::Subscriber sub = n.subscribe<std_msgs::Bool>("/cmd_move", 10, cmdCallback);
-  ros::ServiceClient client = n.serviceClient<gazebo_msgs::SetModelState>("/gazebo/set_model_state");
-  gazebo_msgs::SetModelState set_model_state_srv;
-  ros::Publisher pub = n.advertise<std_msgs::Bool>("/cmd_move", 10);
+    ROS_INFO("🔥【时空多边往复移动障碍物集群】成功上线运行！测试大闸开启...");
 
-  MovingCylinder cylinder[cylinder_num];
-  geometry_msgs::Point init_pos[cylinder_num];
-  geometry_msgs::Twist twist[cylinder_num];
+    while (ros::ok()) {
+        // 更新两台障碍物的物理运动状态
+        obs1.update(dt);
+        obs2.update(dt);
 
-  for (uint8_t i = 0; i < cylinder_num; i++)
-  {
-    n.param<double>("x" + to_string(i), init_pos[i].x, 5);
-    n.param<double>("y" + to_string(i), init_pos[i].y, 5);
-    n.param<double>("z" + to_string(i), init_pos[i].z, 0.25);
-    n.param<double>("vx" + to_string(i), twist[i].linear.x, 0.0);
-    n.param<double>("vy" + to_string(i), twist[i].linear.y, 0.0);
+        // 组装 Rviz 空间高维可视化 Marker 消息
+        visualization_msgs::MarkerArray marker_array;
+        
+        // 组装障碍物 1 的圆柱体特征
+        visualization_msgs::Marker m1;
+        m1.header.frame_id = "odom"; // 确保与你自车的坐标系一致
+        m1.header.stamp = ros::Time::now();
+        m1.ns = "dynamic_obs"; m1.id = 1;
+        m1.type = visualization_msgs::Marker::CYLINDER;
+        m1.action = visualization_msgs::Marker::ADD;
+        m1.pose = obs1.getPose();
+        m1.scale.x = 0.6; m1.scale.y = 0.6; m1.scale.z = 1.0; // 直径 0.6m，高 1.0m 的圆柱
+        m1.color.r = 1.0; m1.color.g = 0.0; m1.color.b = 0.0; m1.color.a = 0.8; // 亮红色
+        marker_array.markers.push_back(m1);
 
-    cylinder[i].setPosition(init_pos[i]);
-    cylinder[i].setVel(twist[i]);
-  }
+        // 组装障碍物 2 的圆柱体特征
+        visualization_msgs::Marker m2 = m1;
+        m2.id = 2;
+        m2.pose = obs2.getPose();
+        m2.scale.x = 0.5; m2.scale.y = 0.5; m2.scale.z = 1.0;
+        m2.color.r = 1.0; m2.color.g = 0.5; m2.color.b = 0.0; // 亮橙色
+        marker_array.markers.push_back(m2);
 
-  while (ros::ok())
-  {
-    std_msgs::Bool msg;
-    msg.data = true;
-    pub.publish(msg);
-    if (is_move)
-    {
-      for (uint8_t i = 0; i < cylinder_num; i++)
-        cylinder[i].updateState();
+        marker_pub.publish(marker_array);
+
+        ros::spinOnce();
+        rate.sleep();
     }
-
-    for (uint8_t i = 0; i < cylinder_num; i++)
-    {
-      set_model_state_srv.request.model_state = cylinder[i].model_state_;
-      client.call(set_model_state_srv);
-    }
-
-    ros::spinOnce();
-    ros::Duration(0.01).sleep();
-  }
-  return 0;
+    return 0;
 }

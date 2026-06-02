@@ -30,13 +30,14 @@ class PerfectLidarBridge:
         pts_gen = point_cloud2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True)
         points_3d = np.array([[p[0], p[1], p[2]] for p in pts_gen])
         
-        if points_3d.size == 0: 
+        if points_3d.size == 0:
             return
 
         spatial_mask = (points_3d[:, 2] > -0.45) & (points_3d[:, 2] < 0.20)
         valid_3d_pts = points_3d[spatial_mask]
         
         if valid_3d_pts.size == 0: 
+            self.publish_empty_heartbeat()
             return
 
         x = valid_3d_pts[:, 0]
@@ -49,6 +50,7 @@ class PerfectLidarBridge:
         angles_2d = angles_2d[dist_mask]
 
         if distances_2d.size == 0: 
+            self.publish_empty_heartbeat()
             return
 
         bin_indices = np.floor((angles_2d + np.pi) / (2 * np.pi) * self.num_rays).astype(int)
@@ -64,12 +66,8 @@ class PerfectLidarBridge:
         final_distances = reconstructed_ranges[valid_ray_mask]
         final_angles = self.ray_angles[valid_ray_mask]
 
-        if final_distances.size == 0: 
-            # 如果视野内极度空旷无点云，也要发布空消息维持控制回路的心跳频率
-            header = Header(stamp=rospy.Time.now(), frame_id=self.frame_id)
-            fields = [PointField('x', 0, PointField.FLOAT32, 1), PointField('y', 4, PointField.FLOAT32, 1), PointField('z', 8, PointField.FLOAT32, 1)]
-            pc2_msg = point_cloud2.create_cloud(header, fields, np.zeros((0, 3)))
-            self.pub.publish(pc2_msg)
+        if final_distances.size == 0:
+            self.publish_empty_heartbeat()
             return
 
         reconstructed_x = final_distances * np.cos(final_angles)
@@ -84,6 +82,24 @@ class PerfectLidarBridge:
         output_3d = np.hstack((reconstructed_x.reshape(-1, 1), reconstructed_y.reshape(-1, 1), np.zeros((reconstructed_x.size, 1))))
         
         pc2_msg = point_cloud2.create_cloud(header, fields, output_3d)
+        self.pub.publish(pc2_msg)
+
+    def publish_empty_heartbeat(self):
+        """ 
+        🟢【标准控制级后门守护】：发布一帧绝对合法的“虚无安全锚点”。
+        点位置在 [99.0, 99.0, 0.0]，它既满足了 ROS 网卡 100% 成功发布，
+        又会在自车接收端因为 np.min(dists) 远大于 trigger_bound 被完美视为空旷地，
+        从而秒杀幽灵残影，瞬间激活标称控制器！
+        """
+        header = Header(stamp=rospy.Time.now(), frame_id=self.frame_id)
+        fields = [
+            PointField('x', 0, PointField.FLOAT32, 1),
+            PointField('y', 4, PointField.FLOAT32, 1),
+            PointField('z', 8, PointField.FLOAT32, 1)
+        ]
+        # 放置一个 99 米外的点
+        fake_empty_pt = np.array([[99.0, 99.0, 0.0]], dtype=np.float32)
+        pc2_msg = point_cloud2.create_cloud(header, fields, fake_empty_pt)
         self.pub.publish(pc2_msg)
 
 if __name__ == '__main__':

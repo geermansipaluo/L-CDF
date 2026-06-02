@@ -6,8 +6,8 @@ from functools import partial
 from jax import jit
 import matplotlib.pyplot as plt
 from jaxproxqp.jaxproxqp import JaxProxQP
-import torch
 from torch_geometric.data import HeteroData
+import torch
 
 # =========================================================================
 # 1. 核心底层数学函数与局部激光雷达仿真定义 (保全 JAX 高速算子)
@@ -249,41 +249,33 @@ def generate_random_environment(r_ego):
     return jnp.array(all_C), jnp.array(all_d), jnp.array(all_v), my_target
 
 # =========================================================================
-# 4. 🟢【全新重构】：PyG 异质图数据集固化保存系统
+# 4. PyG 异质图数据集固化保存系统
 # =========================================================================
 def save_pyg_hetero_dataset(pyg_data_list, filename="dataset.pt"):
-    """
-    完全对齐三实体（ego, point, goal）异质图规范的分布式落盘系统。
-    将数据直接固化为 PyTorch 纯正的高压缩二进制分布式图集。
-    """
     total_frames = len(pyg_data_list)
     empty_frames = sum([1 for data in pyg_data_list if data['point'].x.shape[0] == 0])
     avoid_frames = total_frames - empty_frames
     
     print("\n" + "="*60)
-    print(f"💾 [图数据数据流落盘系统启动] -> 正在生成三实体统一图数据集...")
+    print(f"💾 [自监督数据探索流水线落盘] -> 正在生成包含碰撞负样本的三实体统一图数据集...")
     
-    # 执行 PyTorch 二进制序列化存储
     torch.save(pyg_data_list, filename)
     
     print(f" -> 成功将 {total_frames} 帧导航样本存储至：{filename}")
     print(f"📊 [图样本集成分最终审计]")
-    print(f"    |-- 密集型高价值真实避障图帧: {avoid_frames} 帧 ({avoid_frames/total_frames*100:.1f}%)")
-    print(f"    |-- 宽阔型平缓巡航无点云图帧: {empty_frames} 帧 ({empty_frames/total_frames*100:.1f}%)")
-    print(f"💡 [提示] 在训练器端通过 `dataset = torch.load('{filename}')` 即可实现一行解包加载！")
+    print(f"    |-- 密集型高价值避障/碰撞图帧: {avoid_frames} 帧 ({avoid_frames/total_frames*100:.1f}%)")
+    print(f"    |-- 平衡下采样自由巡航图帧: {empty_frames} 帧 ({empty_frames/total_frames*100:.1f}%)")
     print("="*60 + "\n")
 
 # =========================================================================
-# 5. 自动化无限场景闭环控制流水线
+# 5. 自动化自监督探索采集控制流水线
 # =========================================================================
 if __name__ == '__main__':
     R_EGO = 0.31  
-    
-    # 学术论文级强鲁棒特征数据集标准体量调整（测试使用 10000 帧）
     TARGET_DATA_LENGTH = 10000
     
     pyg_dataset = []
-    total_episodes_run, successful_episodes, discarded_episodes = 0, 0, 0
+    total_episodes_run, successful_episodes, collision_episodes = 0, 0, 0
 
     planner = DynamicEnvCDFPlanner()
 
@@ -294,7 +286,7 @@ if __name__ == '__main__':
     _dummy_nom = jnp.array([0.0, 0.0])
     _, _ = planner.solve_agent_qp(_dummy_p, _dummy_nom, _all_C, _all_d, _all_v, _my_target, R_EGO)
     _, _ = simulate_lidar_local_raw(_dummy_ego, _all_C, _all_d) 
-    print("✨ 算子图编译成功！后台加速无图表分布式采集启动...\n")
+    print("✨ 算子图编译成功！探索性动作采集启动...\n")
 
     while len(pyg_dataset) < TARGET_DATA_LENGTH:
         total_episodes_run += 1
@@ -305,7 +297,6 @@ if __name__ == '__main__':
         total_steps = 1800                               
         L = 0.15                                        
 
-        # 🟢 修复点 1：每个 Episode 开始前，正确、必须初始化轨迹临时缓冲区
         episode_pyg_buffer = []
         has_collision_occurred = False
 
@@ -327,7 +318,9 @@ if __name__ == '__main__':
                     has_collision_occurred = True
                     break
             
+            # 🟢 核心转型 1：硬碰撞发生后，不再倒掉缓存。立刻中止当前回合，但保留碰撞瞬间的数据！
             if has_collision_occurred:
+                collision_episodes += 1
                 break 
 
             # --- 2. 局部感知变长不规则裁剪 ---
@@ -345,56 +338,45 @@ if __name__ == '__main__':
                 ego_p, ego_u_nom, all_C, all_d, all_v, my_target, R_EGO
             )
 
-            v = u_opt[0] * jnp.cos(theta) + u_opt[1] * jnp.sin(theta)
-            omega = (-u_opt[0] * jnp.sin(theta) + u_opt[1] * jnp.cos(theta)) / L
+            control_residual = np.linalg.norm(np.array(u_opt) - np.array(ego_u_nom))
+            is_in_conflict_manifold = control_residual > 0.1
 
-            # --- 4. 局部系转体特征组装层 —— 确保旋转与平移不变性 ---
+            v_qp = float(u_opt[0] * jnp.cos(theta) + u_opt[1] * jnp.sin(theta))
+            omega_qp = float((-u_opt[0] * jnp.sin(theta) + u_opt[1] * jnp.cos(theta)) / L)
+
+            # 🟢 核心转型 2：在专家的最优决策基础动作上施加微小随机高斯探索扰动，逼迫系统试错
+            # 物理含义：让小车小概率走向危险流形，从而提供差分物理场的临界自监督负样本
+            # v_noise = np.random.normal(0.0, 0.05)
+            # omega_noise = np.random.normal(0.0, 0.10)
+            
+            # v = np.clip(v_qp + v_noise, -0.2, 0.8)
+            # omega = np.clip(omega_qp + omega_noise, -1.5, 1.5)
+
+            # --- 4. 局部系特征转换（保证平移旋转不变性） ---
             dx = float(my_target[0]) - x
             dy = float(my_target[1]) - y
             dist_to_goal_val = np.hypot(dx, dy)
 
-            # 提取自车局部载体系下的目标相对位置坐标 (消除全局绝对坐标长距离冲刷隐患)
-            # 严格遵照反向转体投影：
             target_local_x = dx * np.cos(theta) + dy * np.sin(theta)
             target_local_y = -dx * np.sin(theta) + dy * np.cos(theta)
-
-            compressed_dist = np.tanh(dist_to_goal_val / 3.0)
-            
-            angle_to_target = jnp.arctan2(my_target[1] - y, my_target[0] - x)
-            yaw_err = angle_to_target - theta
-            cos_yaw_err = jnp.cos(yaw_err)
-            sin_yaw_err = jnp.sin(yaw_err)
 
             v_nom_kin = ego_u_nom[0] * jnp.cos(theta) + ego_u_nom[1] * jnp.sin(theta)
             omega_nom_kin = (-ego_u_nom[0] * jnp.sin(theta) + ego_u_nom[1] * jnp.cos(theta)) / L
             
-            # X 缩减为纯净的自车 4维固有特征向量：(x, y, theta, dist_to_goal)
             X_step = np.array([x, y, theta, dist_to_goal_val], dtype=np.float32)
+            # 挂载的实际执行动作标签必须是带有扰动的 (v, omega)，以确保推演物理连续性
+            y_step = np.array([float(v_qp), float(omega_qp), float(psi_curr_val), float(v_nom_kin), float(omega_nom_kin)], dtype=np.float32)
             
-            # y 固定为规整的多任务监督标签
-            y_step = np.array([float(v), float(omega), float(psi_curr_val), float(v_nom_kin), float(omega_nom_kin)], dtype=np.float32)
-            
-            # --- 5. 巡航负样本平衡过滤阀与 🟢 三实体异质图组装 ---
+            # --- 5. 平衡下采样与三实体异质图组装 ---
             is_empty = (len(current_pc_local) == 0)
-            should_record = True
-            if is_empty:
-                should_record = (np.random.rand() < 0.01)
-                
-            if should_record:
-                # 声明高级异质图容器
+            if is_in_conflict_manifold:
+                # 🔴 场景 A：满足控制残差门控（进入红框避障攻坚区）-> 100% 全量打包入库，绝不漏掉核心负样本！
                 graph_sample = HeteroData()
-                
-                # 实体 1：自车节点特征 [1, 4] -> 保存当前纯净自车状态
                 graph_sample['ego'].x = torch.tensor(X_step, dtype=torch.float32).unsqueeze(0)
-                
-                # 实体 2：目标点虚拟节点特征 [1, 2] -> 灌入自车局部系下的相对目标诱导坐标
-                # 对应 GCBF+ 论文中多边感知架构对导航吸引力输入的表达
                 graph_sample['goal'].x = torch.tensor([target_local_x, target_local_y], dtype=torch.float32).unsqueeze(0)
                 
-                # 实体 3：变长激光雷达击中点节点特征 [K, 2]
                 if is_empty:
                     graph_sample['point'].x = torch.zeros((0, 2), dtype=torch.float32)
-                    # 必须给一个明确的 [2, 0] 形状的空 Edge Index，强制 PyG 锁死异质图骨架
                     graph_sample['point', 'to', 'ego'].edge_index = torch.zeros((2, 0), dtype=torch.long)
                 else:
                     graph_sample['point'].x = torch.tensor(current_pc_local, dtype=torch.float32)
@@ -403,39 +385,78 @@ if __name__ == '__main__':
                     receivers_p = torch.zeros(num_points, dtype=torch.long)
                     graph_sample['point', 'to', 'ego'].edge_index = torch.stack([senders_p, receivers_p], dim=0)
                     
-                # 边编制 B：建立引力目标点指向自车的“引力导航消息流边” [2, 1]
                 graph_sample['goal', 'to', 'ego'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
-                
-                # 挂载监督多任务多目标标签 [1, 5]
+                graph_sample['ego', 'to', 'goal'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
                 graph_sample.y = torch.tensor(y_step, dtype=torch.float32).unsqueeze(0)
                 
-                # 推进当前 Episode 临时安全屋
                 episode_pyg_buffer.append(graph_sample)
 
-            # --- 6. 物理系统状态演进 ---
-            new_x = x + v * jnp.cos(theta) * dt
-            new_y = y + v * jnp.sin(theta) * dt
-            new_theta = theta + omega * dt
+            else:
+                # 🔵 场景 B：不满足避障残差控制量（处于巡航或边缘缓和流形）
+                if is_empty:
+                    # 💡 子场景 1：如果此时点云数据为空，直接百分之百狠心抛弃，绝对不进入缓冲区！
+                    pass 
+                else:
+                    # 💡 子场景 2：如果点云不为空（小车看到了远处的障碍物，但未发生激烈对抗），按 10% 的比例进行平衡下采样保存
+                    if np.random.rand() < 0.10:
+                        graph_sample = HeteroData()
+                        graph_sample['ego'].x = torch.tensor(X_step, dtype=torch.float32).unsqueeze(0)
+                        graph_sample['goal'].x = torch.tensor([target_local_x, target_local_y], dtype=torch.float32).unsqueeze(0)
+                        
+                        graph_sample['point'].x = torch.tensor(current_pc_local, dtype=torch.float32)
+                        num_points = graph_sample['point'].x.shape[0]
+                        senders_p = torch.arange(num_points, dtype=torch.long)
+                        receivers_p = torch.zeros(num_points, dtype=torch.long)
+                        graph_sample['point', 'to', 'ego'].edge_index = torch.stack([senders_p, receivers_p], dim=0)
+                        
+                        graph_sample['goal', 'to', 'ego'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+                        graph_sample['ego', 'to', 'goal'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+                        graph_sample.y = torch.tensor(y_step, dtype=torch.float32).unsqueeze(0)
+                        
+                        episode_pyg_buffer.append(graph_sample)
+            # should_record = True
+            # if is_empty:
+            #     should_record = (np.random.rand() < 0.01)
+                
+            # if should_record:
+            #     graph_sample = HeteroData()
+            #     graph_sample['ego'].x = torch.tensor(X_step, dtype=torch.float32).unsqueeze(0)
+            #     graph_sample['goal'].x = torch.tensor([target_local_x, target_local_y], dtype=torch.float32).unsqueeze(0)
+                
+            #     if is_empty:
+            #         graph_sample['point'].x = torch.zeros((0, 2), dtype=torch.float32)
+            #         graph_sample['point', 'to', 'ego'].edge_index = torch.zeros((2, 0), dtype=torch.long)
+            #     else:
+            #         graph_sample['point'].x = torch.tensor(current_pc_local, dtype=torch.float32)
+            #         num_points = graph_sample['point'].x.shape[0]
+            #         senders_p = torch.arange(num_points, dtype=torch.long)
+            #         receivers_p = torch.zeros(num_points, dtype=torch.long)
+            #         graph_sample['point', 'to', 'ego'].edge_index = torch.stack([senders_p, receivers_p], dim=0)
+                    
+            #     graph_sample['goal', 'to', 'ego'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+            #     graph_sample['ego', 'to', 'goal'].edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+            #     graph_sample.y = torch.tensor(y_step, dtype=torch.float32).unsqueeze(0)
+                
+            #     episode_pyg_buffer.append(graph_sample)
+
+
+            # --- 6. 物理系统状态演进（必须基于携带扰动的真实动作推进） ---
+            new_x = x + v_qp * jnp.cos(theta) * dt
+            new_y = y + v_qp * jnp.sin(theta) * dt
+            new_theta = theta + omega_qp * dt
             ego_state = jnp.array([new_x, new_y, new_theta])
             all_d = all_d + all_v * dt
 
             if jnp.linalg.norm(my_target - ego_state[:2]) < 0.2:
+                successful_episodes += 1
                 break
 
-        # =========================================================================
-        # 🟢 修复点 2：洗数与数据汇流机制完全重构对接
-        # =========================================================================
-        if has_collision_occurred:
-            discarded_episodes += 1
-        else:
-            successful_episodes += 1
-            # 将通过碰撞在线审计审查后的纯净异质图列表推入全局长远存储中
-            pyg_dataset.extend(episode_pyg_buffer)
-            
-            print(f"📊 收集进度: {len(pyg_dataset)}/{TARGET_DATA_LENGTH} 个统一异质图对象已固化 "
-                  f"({len(pyg_dataset)/TARGET_DATA_LENGTH*100:.1f}%) | "
-                  f"战局统计: {total_episodes_run} [完美: {successful_episodes} | 冲突熔断: {discarded_episodes}]")
+        # 🟢 核心转型 3：不论成功突围还是中途作死撞车，临时缓冲区的图样本全部汇入全局集合
+        pyg_dataset.extend(episode_pyg_buffer)
+        
+        print(f"📊 收集进度: {len(pyg_dataset)}/{TARGET_DATA_LENGTH} 个图对象已固化 "
+              f"({len(pyg_dataset)/TARGET_DATA_LENGTH*100:.1f}%) | "
+              f"战局审计 -> 回合总数: {total_episodes_run} [突围成功: {successful_episodes} | 碰撞熔断: {collision_episodes}]")
 
-    # 达标裁剪并真正触发硬盘二进制写入
     pyg_dataset = pyg_dataset[:TARGET_DATA_LENGTH]
     save_pyg_hetero_dataset(pyg_dataset, filename="dataset.pt")

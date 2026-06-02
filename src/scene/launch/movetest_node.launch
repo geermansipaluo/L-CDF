@@ -2,7 +2,7 @@
 
 <launch>
   <node pkg="scene" type="movetest_node" name="movetest_node" output="screen" required="true">
-      <param name="x0" type="double" value="22"/>
+      <param name="x0" type="double" value="4.5"/>
       <param name="y0" type="double" value="0.75"/>
       <param name="z0" type="double" value="0.25"/>
       <param name="vx0" type="double" value="0.0"/>

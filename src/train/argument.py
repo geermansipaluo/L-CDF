@@ -17,13 +17,13 @@ def get_args():
                         help="Root path for experimental tracking and weight storage.")
 
     # 2. 数据路径与显卡指定
-    parser.add_argument("--dataset_path", type=str, default="/home/ubuntu/Desktop/gxf/LCDF/train/model/dataset.pt",
+    parser.add_argument("--dataset_path", type=str, default="/home/ubuntu/Desktop/gxf/LCDF/train/dataset/dataset_10000.pt",
                         help="Path to the compressed expert trajectory dataset.")
     parser.add_argument("--cuda_device", type=str, default="0",
                         help="Target single GPU device index for training.")
 
     # 3. 核心控制与风险多任务超参数
-    parser.add_argument("--batch_size", type=int, default=256,
+    parser.add_argument("--batch_size", type=int, default=64,
                         help="Batch size utilized for training on the single GPU.")
     parser.add_argument("--num_epochs", type=int, default=500000,
                         help="Maximum training epochs for total optimization loop.")

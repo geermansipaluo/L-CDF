@@ -218,13 +218,14 @@ class DynamicEnvCDFPlanner:
 # 3. 自动化闭环控制仿真循环
 # =========================================================================
 if __name__ == '__main__':
-    print("⚡ [多目标追踪模式启动] 正在测试差分小车挑战多个动态障碍物的闭环复合导航...")
+    print("⚡ [冲突流形划分模式启动] 正在计算输入残差，自动切割黄金避障负样本...")
 
     R_EGO = 0.31
     all_C = jnp.array([[0.5, 0.2, 0.0, 4.0]]) 
-    all_d = jnp.array([[5.0, 0.0]])                 
+    all_d = jnp.array([[5.0, 0.5]])                 
     
-    ego_state = jnp.array([0.0, 0.0, 0.0])          
+    # 给小车故意初始化一个朝向角 theta = 0.5 弧度（用来测试和区分开局对齐目标与真正避障的区别）
+    ego_state = jnp.array([0.0, 0.0, 0.5])          
     my_target = jnp.array([10.0, 0.0])              
     
     obs_states = jnp.array([
@@ -244,13 +245,16 @@ if __name__ == '__main__':
     ego_hist = []
     obs_hist = [] 
     z_collection = []                            
+    
+    # 🟢 核心记录容器：用来存储每一帧小车是否触发了避障数据切割条件
+    avoidance_flag_hist = []
 
     static_collisions = []
     dynamic_collisions = []
 
     planner = DynamicEnvCDFPlanner()
 
-    print("⏳ 正在进行 XLA 全局算子融合编译 (涵盖密集点云离散交叉检索算子)...")
+    print("⏳ 正在进行 XLA 全局算子融合编译...")
     dummy_p = jnp.array([0.0, 0.0])
     dummy_nom = jnp.array([0.0, 0.0])
     _ = planner.solve_agent_qp(dummy_p, dummy_nom, obs_states, obs_velocities, all_C, all_d, my_target, R_EGO, obs_radii)
@@ -269,8 +273,8 @@ if __name__ == '__main__':
         z_collection.append(current_pc_local)
 
         dx_rect = max(abs(x - 5.0) - 0.5, 0.0)
-        dy_rect = max(abs(y - 0.0) - 0.2, 0.0)
-        if (abs(x - 5.0) <= 0.5 and abs(y - 0.0) <= 0.2) or ((dx_rect**2 + dy_rect**2)**0.5 < R_EGO):
+        dy_rect = max(abs(y - 0.5) - 0.2, 0.0)
+        if (abs(x - 5.0) <= 0.5 and abs(y - 0.5) <= 0.2) or ((dx_rect**2 + dy_rect**2)**0.5 < R_EGO):
             static_collisions.append([x, y])
 
         for i in range(obs_states.shape[0]):
@@ -283,10 +287,19 @@ if __name__ == '__main__':
         dist_to_goal = jnp.linalg.norm(target_vector)
         ego_u_nom = jnp.where(dist_to_goal > 0.1, 0.5 * target_vector / (dist_to_goal + 1e-6), jnp.zeros(2))
 
+        # 解算出专家安全动作
         u_opt = planner.solve_agent_qp(
             ego_p, ego_u_nom, obs_states, obs_velocities,
             all_C, all_d, my_target, R_EGO, obs_radii
         )
+
+        # 🟢【核心切分算法实施】：计算专家输出控制量 u_opt 与 标称引力控制量 ego_u_nom 之间的 L2 偏差残差
+        control_residual = np.linalg.norm(u_opt - ego_u_nom)
+        
+        # 阈值 1e-3 已经过高度硬化：如果偏差大于此值，说明绝对是由障碍物压迫引起的“强行拦截修改动作”，标记为 True
+        # 它能够完美识别避障起止点，并完美绕开因为初始车头角调整而产生的干扰！
+        is_avoiding = control_residual > 0.09
+        avoidance_flag_hist.append(is_avoiding)
 
         v = u_opt[0] * jnp.cos(theta) + u_opt[1] * jnp.sin(theta)
         omega = (-u_opt[0] * jnp.sin(theta) + u_opt[1] * jnp.cos(theta)) / L
@@ -303,12 +316,12 @@ if __name__ == '__main__':
             break
 
     # =========================================================================
-    # 4. 渲染多体演进与高清无边框图像导出 (图例去重、字体整体放大 1 倍)
+    # 4. 渲染多体演进与冲突流形精准高亮
     # =========================================================================
     ego_hist_np = np.array(ego_hist)
     obs_hist_np = np.array(obs_hist) 
+    avoidance_flags = np.array(avoidance_flag_hist)
 
-    # 全局配置新罗马字体
     plt.rcParams['font.family'] = 'serif'
     plt.rcParams['font.serif'] = ['Times']
     plt.rcParams['axes.unicode_minus'] = False
@@ -328,8 +341,26 @@ if __name__ == '__main__':
             pts_w_y = ego_y + pts_l[:, 0] * sin_th + pts_l[:, 1] * cos_th
             plt.scatter(pts_w_x, pts_w_y, color='crimson', s=1.5, alpha=0.2, zorder=1, label='Pointcloud')
 
-    plt.plot(ego_hist_np[:, 0], ego_hist_np[:, 1], 'b-', linewidth=2.5, label='Robot center path')
-    
+    # 🟢【重头戏修改】：不再机械地画一条一成不变的蓝色实线。而是根据避障条件，分段拼装、绘制轨迹
+    # 没有触发避障的样本画成深蓝色线（巡航直驱）；触发了避障控制量拦截的样本画成加粗的猩红线（攻坚数据集部分）
+    for i in range(len(ego_hist_np) - 1):
+        x_segment = [ego_hist_np[i, 0], ego_hist_np[i+1, 0]]
+        y_segment = [ego_hist_np[i, 1], ego_hist_np[i+1, 1]]
+        
+        if avoidance_flags[i]:
+            # 🔴 精准切分：属于红色方框攻坚区，标记为高亮红，代表数据采集并入存储库
+            plt.plot(x_segment, y_segment, color='red', linestyle='-', linewidth=4.0, zorder=3)
+        else:
+            # 🔵 自由区：名义引力线束直走，保持深蓝色，代表数据下采样剔除
+            plt.plot(x_segment, y_segment, color='darkblue', linestyle='-', linewidth=2.0, zorder=2)
+
+    # 创造虚拟图例句柄，防止线条分段绘制导致 Legend 里生成几百个重复名称
+    from matplotlib.lines import Line2D
+    custom_lines = [
+        Line2D([0], [0], color='darkblue', lw=2.0, label='Nominal Cruise Path (Discarded Data)'),
+        Line2D([0], [0], color='red', lw=4.0, label='Gated Avoidance Path (Saved GNN Data)')
+    ]
+
     num_obstacles = obs_hist_np.shape[1]
     for i in range(num_obstacles):
         plt.plot(obs_hist_np[:, i, 0], obs_hist_np[:, i, 1], '--', linewidth=1.5, label=f'Dynamic obs {i+1} path')
@@ -346,14 +377,13 @@ if __name__ == '__main__':
     for idx in sample_indices:
         th = ego_hist_np[idx, 2]
         plt.arrow(ego_hist_np[idx, 0], ego_hist_np[idx, 1], 0.18*np.cos(th), 0.18*np.sin(th), head_width=0.06, head_length=0.06, fc='darkblue', ec='darkblue', zorder=3)
-        robot_shell = plt.Circle((ego_hist_np[idx, 0], ego_hist_np[idx, 1]), R_EGO, color='blue', fill=True, alpha=0.06, zorder=2)
+        # 根据当前位置是否属于避障攻坚，改变展示的小车外壳颜色
+        circle_color = 'red' if avoidance_flags[idx] else 'blue'
+        robot_shell = plt.Circle((ego_hist_np[idx, 0], ego_hist_np[idx, 1]), R_EGO, color=circle_color, fill=True, alpha=0.06, zorder=2)
         plt.gca().add_patch(robot_shell)
 
-    # 🛠️ 修改 1：将 X、Y 轴标签字体放大一倍（从默认约 10-11 放大到 22）
     plt.xlabel("X", fontsize=22)
     plt.ylabel("Y", fontsize=22)
-    
-    # 🛠️ 修改 2：将坐标轴数字刻度（Ticks）放大一倍（从默认约 9-10 放大到 18）
     plt.tick_params(axis='both', which='major', labelsize=18)
     
     plt.grid(False)
@@ -361,13 +391,13 @@ if __name__ == '__main__':
     plt.xlim(-0.5, 10.5)
     plt.ylim(-1.5, 1.5) 
     
-    # 🛠️ 修改 3：提取当前轴上所有的图例句柄，利用字典键唯一的特性去除重复的 'Pointcloud'
+    # 融合自定义高亮图例与动态障碍物图例
     handles, labels = plt.gca().get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
+    all_handles = custom_lines + [by_label[k] for k in by_label if 'Dynamic' in k or 'Static' in k]
     
-    # 🛠️ 修改 4：应用去重后的图例，并将图例字体放大一倍（从 9 放大到 18）
-    plt.legend(by_label.values(), by_label.keys(), loc='upper right', shadow=True, fontsize=9)
+    plt.legend(handles=all_handles, loc='upper right', shadow=True, fontsize=10)
     
-    plt.savefig('dateset_gen.png', dpi=300, bbox_inches='tight')
-    print("💾 示意图（不含重复图例、字体已整体放大）已成功导出：dateset_gen.png")
+    plt.savefig('data_generate_test.png', dpi=300, bbox_inches='tight')
+    print("💾 冲突流形精准切割测试完成！红蓝分段高清轨迹图已成功导出：cbf_qp_fixed_gated_trajectory.png")
     plt.show()

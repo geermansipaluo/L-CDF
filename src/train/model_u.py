@@ -53,12 +53,16 @@ class DensityNet(nn.Module):
                                              aggr='mean'),
             ('goal', 'to', 'ego'): SAGEConv(in_channels=(hidden_dim, hidden_dim), 
                                             out_channels=hidden_dim, 
+                                            aggr='mean'),
+            # 🆕 增加核心反向引力反馈边：让自车特征更新目标靶点的隐藏表征，增强远期意图
+            ('ego', 'to', 'goal'): SAGEConv(in_channels=(hidden_dim, hidden_dim), 
+                                            out_channels=hidden_dim, 
                                             aggr='mean')
         }, aggr='sum') # 将斥力场的障碍物特征与引力场的目标特征在自车节点处实施物理求和
         
         # 强力跨模态特征多层融合精炼
         self.fusion = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim*2, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.LeakyReLU(0.1),
             nn.Dropout(0.2)
@@ -99,9 +103,18 @@ class DensityNet(nn.Module):
             x_dict={'ego': e_feat, 'goal': g_f, 'point': p_f},
             edge_index_dict=batch.edge_index_dict
         )
+
+        ego_final = e_feat + h_dict['ego'] if 'ego' in h_dict else e_feat
+        goal_final = g_f + h_dict['goal'] if 'goal' in h_dict else g_f
+        
+        # 跨层拼接：不论点云是否有值，目标意图高维特征都在特征头占有一席之地
+        combined_feat = torch.cat([ego_final, goal_final], dim=1)
+        
+        # 4. 多模态精炼融合与双头输出
+        fused_feat = self.fusion(combined_feat)
         
         # 提取汇聚后自车节点特征，此时维度在数学上全自动对齐自车批次大小: [Batch_Size, hidden_dim]
-        fused_feat = self.fusion(h_dict['ego'])
+        # fused_feat = self.fusion(h_dict['ego'])
         
         # 3. 双头多任务同步前向输出
         action = self.action_head(fused_feat)  # [Batch_Size, 2]

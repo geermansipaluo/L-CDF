@@ -1,0 +1,2 @@
+model_best_601：loss_ctrl + 2*loss_risk + 20*loss_physics + 10*loss_goal，但没加goal to ego边的最佳模型
+model
