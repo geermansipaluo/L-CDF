@@ -30,7 +30,7 @@
 
   <!-- VLP16 激光雷达 -->
   <xacro:include filename="$(find velodyne_description)/urdf/HDL-32E.urdf.xacro"/>
-  <xacro:HDL-32E parent="base_link" name="velodyne" topic="/velodyne_points" hz="10" samples="512" gpu="false">
+  <xacro:HDL-32E parent="base_link" name="velodyne" topic="/velodyne_points" hz="10" samples="256" gpu="false">
         <origin xyz="0 0 0.5" rpy="0 0 0" />
   </xacro:HDL-32E>
 

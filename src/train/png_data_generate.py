@@ -220,7 +220,7 @@ class DynamicEnvCDFPlanner:
 if __name__ == '__main__':
     print("⚡ [冲突流形划分模式启动] 正在计算输入残差，自动切割黄金避障负样本...")
 
-    R_EGO = 0.31
+    R_EGO = 0.41
     all_C = jnp.array([[0.5, 0.2, 0.0, 4.0]]) 
     all_d = jnp.array([[5.0, 0.5]])                 
     

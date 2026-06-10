@@ -2,121 +2,226 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import SAGEConv, HeteroConv, global_max_pool
+from torch_geometric.nn import DynamicEdgeConv, global_max_pool, knn_graph, GATConv
+# 🟢 引入 BarrierNet 同款工业级可微参数化凸优化层
+from qpth.qp import QPFunction, QPSolvers
 
-# =========================================================================
-# 1. 基础多层前馈感知机算子 (MLP)
-# =========================================================================
-def build_mlp(in_dim, hidden_dims, out_dim, activation=nn.LeakyReLU, dropout=0.0):
-    layers = []
-    current_dim = in_dim
-    for h_dim in hidden_dims:
-        layers.append(nn.Linear(current_dim, h_dim))
-        layers.append(nn.LayerNorm(h_dim))
-        layers.append(activation(0.1))
-        if dropout > 0.0:
-            layers.append(nn.Dropout(dropout))
-        current_dim = h_dim
-    layers.append(nn.Linear(current_dim, out_dim))
-    return nn.Sequential(*layers)
+class GeometricEncoder(nn.Module):
+    """ 多尺度点云图卷积编码器 —— 完美融汇变长局部空间拓扑 """
+    def __init__(self, in_dim=2, hidden_dim=512, k=10):
+        super().__init__()
+        self.k = k
+        
+        # 第一层图卷积：Dynamic Edge Conv (局部邻域均值消息传递)
+        self.conv1 = DynamicEdgeConv(
+            nn=nn.Sequential(
+                nn.Linear(2*in_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.LeakyReLU(0.1)
+            ),
+            k=self.k,
+            aggr='mean'
+        )
+        self.norm1 = nn.BatchNorm1d(hidden_dim)
+        
+        # 第二层图注意力卷积：GATConv 
+        self.conv2 = GATConv(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim,  
+            heads=8,                  
+            #dropout=0.2,
+            concat=False,             
+            add_self_loops=False      
+        )
+        self.res_fc = nn.Identity()  
+        
+        # 第三层图卷积：Dynamic Edge Conv (提取极限边缘斥力特征)
+        self.conv3 = DynamicEdgeConv(
+            nn=nn.Sequential(
+                nn.Linear(2*hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.LeakyReLU(0.1)
+            ),
+            k=self.k,
+            aggr='max'
+        )
+        
+        # 特征降维融合层
+        self.downsample = nn.Sequential(
+            nn.Linear(hidden_dim*3, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            #nn.Dropout(0.3)
+        )
 
-# =========================================================================
-# 2. 完全对齐最新异质图规范的 DensityNet 控制策略网络
-# =========================================================================
-class DensityNet(nn.Module):
+    def forward(self, points):
+        """
+        points: 传入标准 PyG 同质图 Data 对象 (包含 points.pos 和 points.batch)
+        """
+        x = points.pos           # [Total_Points, 2] 局部坐标下的点云坐标
+        batch_idx = points.batch # [Total_Points]
+        
+        # 1. 动态构建 KNN 图并进行第一层边缘卷积
+        edge_index = knn_graph(x, k=self.k, batch=batch_idx, loop=True)
+        x1 = self.conv1(x, batch_idx)
+        x1 = self.norm1(x1)
+        x1 = F.relu(x1)
+        
+        # 2. 第二层图注意力网络，带残差保护
+        x2 = self.conv2(x1, edge_index)
+        x2 = F.leaky_relu(x2 + self.res_fc(x1), 0.2)
+        
+        # 3. 第三层高动态特征提取
+        x3 = self.conv3(x2, batch_idx)
+        
+        # 4. 级联多尺度空间几何特征
+        x_multi = torch.cat([x1, x2, x3], dim=1)
+        x_multi = self.downsample(x_multi)
+        
+        # 5. 全局最大池化：彻底干掉不规则变长输入，秒变固定维数几何特征
+        x_global = global_max_pool(x_multi, batch_idx)  # [Batch_Size, hidden_dim]
+        return x_global
+
+
+class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
     """
-    DensityNet 核心多任务异质图控制网络。
-    完全看齐 GCBF+ 论文架构，雷达点云消息与目标导航消息通过独立的图卷积分流聚拢，
-    彻底从代数框架上消灭了 Batch_Size 与变长点云的维度不匹配硬伤。
+    包装成标准神经网络层的 6维升维参数化可微安全层
+    它在前向调用 qpth 批量解算 6维凸优化，在反向自动完成 7x7 维的 KKT 齐次矩阵微分传导
     """
-    def __init__(self, hidden_dim=256):
+    def __init__(self, lambda_smooth=1):
+        super().__init__()
+        self.lambda_smooth = lambda_smooth
+        
+    def forward(self, u_nom, G_cdf_6d, h_cdf):
+        """
+        u_nom: UNet 吐出的狂野动作名义量 [Batch_Size, 2]
+        G_cdf_6d: 数据集中切片出来的完整 6维约束矩阵系数 [Batch_Size, 1, 6]
+        h_cdf: 约束势能上限 [Batch_Size, 1]
+        """
+        batch_size = u_nom.shape[0]
+        device = u_nom.device
+
+        G_u = G_cdf_6d[:, :, 0:2] # [Batch_Size, 1, 2]
+        # 计算名义量当前的约束违反度
+        constraint_violation = torch.bmm(G_u, u_nom.unsqueeze(2)).squeeze(2) - h_cdf # [Batch_Size, 1]
+        # 如果违反严重，将动作向内做一次解析衰减，极大地给 qpth 减压
+        decay_factor = torch.where(constraint_violation > 1, 1.0 / (1.0 + constraint_violation), torch.ones_like(constraint_violation))
+        u_nom_projected = u_nom * decay_factor
+
+        # h_clipped = torch.clamp(h_cdf.view(batch_size), min=1e-5, max=1.0)
+        # self.lambda_smooth = 1.0 + 30.0 * torch.exp(-15.0 * h_clipped)
+        
+        # 1. 🟢【参数化升维代数重组】：在 PyTorch 内部完美重组专家 6x6 的正定代价矩阵 H
+        val_uu = 2.0 * (1.0 + 2.0 * self.lambda_smooth)
+        val_zz = 2.0 * self.lambda_smooth
+        val_uz = -2.0 * self.lambda_smooth
+        
+        P_in = torch.zeros(batch_size, 6, 6, device=device)
+        
+        # 填充动作和松弛自相关的对角项
+        P_in[:, 0, 0] = val_uu; P_in[:, 1, 1] = val_uu
+        P_in[:, 2, 2] = val_zz; P_in[:, 3, 3] = val_zz
+        P_in[:, 4, 4] = val_zz; P_in[:, 5, 5] = val_zz
+        
+        # 填充动作与松弛交叉互相关的非对角耦合项
+        P_in[:, 0, 2] = val_uz; P_in[:, 2, 0] = val_uz
+        P_in[:, 1, 3] = val_uz; P_in[:, 3, 1] = val_uz
+        P_in[:, 0, 4] = val_uz; P_in[:, 4, 0] = val_uz
+        P_in[:, 1, 5] = val_uz; P_in[:, 5, 1] = val_uz
+        
+        # 2. 🟢 完美重组 6维线性项向量 g (前两位挂载名义驱动，后四位辅助位置补零)
+        g_in = torch.zeros(batch_size, 6, device=device)
+        g_in[:, 0:2] = -2.0 * u_nom
+        # g_in[:, 0:2] = -2.0 * u_nom_projected
+        
+        # 3. 建立零维等式约束占位符
+        e = torch.Tensor().to(device)
+        A = torch.Tensor().to(device)
+        
+        try:
+            # 采用具有迭代细化扩展的 PDIPM_BATCHED 求解器，增强数学鲁棒性
+            sol_6d = QPFunction(verbose=False, solver=QPSolvers.PDIPM_BATCHED)(P_in, g_in, G_cdf_6d, h_cdf, e, A)
+        except Exception as e_qp:
+            # 如果遇到极端边界退化引发求解崩溃，通过标称直驱机制进行无损防御兜底
+            print(f"⚠️ [qpth 数值临界拦截] 捕获极端奇异发散，启用标称柔性降维防线.")
+            sol_6d = torch.zeros(batch_size, 6, device=device)
+            sol_6d[:, 0:2] = u_nom
+
+        u_safe = sol_6d[:, 0:2]
+        # 5. 返回 6维完整最优状态（供 Loss 针对 6维进行全局全状态惩罚洗礼）
+        return u_safe
+
+
+class UNet(nn.Module):
+    """
+    大合拢端到端参数化可微控制策略网络 (完全契合 6维辅助松弛松弛版)
+    """
+    def __init__(self, state_dim=4, hidden_dim=512):
         super().__init__()
         
-        # -----------------------------------------------------------------
-        # 三实体独立高维空间投影编码器 (Entity Encoders)
-        # -----------------------------------------------------------------
-        # 自车 ego 状态输入 4维: [x, y, theta, dist_to_goal]
-        self.ego_encoder = build_mlp(4, [hidden_dim], hidden_dim)
-        # 导航引力节点 goal 相对输入 2维: [target_local_x, target_local_y]
-        self.goal_encoder = build_mlp(2, [hidden_dim], hidden_dim)
-        # 避障斥力节点 point 输入 2维: [pc_x, pc_y]
-        self.point_encoder = build_mlp(2, [hidden_dim], hidden_dim)
-        
-        # -----------------------------------------------------------------
-        # 🔴 论文同款：星形图双向消息异质图卷积 (Hetero Message Passing)
-        # -----------------------------------------------------------------
-        # 雷达点和引力靶点同时通过其 edge_index 关系，无缝向自车节点汇聚特征
-        # PyG 在底层会自动处理 13015 到 256 的多对一消息合并，免去外界任何手动广播代码
-        self.hetero_conv = HeteroConv({
-            ('point', 'to', 'ego'): SAGEConv(in_channels=(hidden_dim, hidden_dim), 
-                                             out_channels=hidden_dim, 
-                                             aggr='mean'),
-            ('goal', 'to', 'ego'): SAGEConv(in_channels=(hidden_dim, hidden_dim), 
-                                            out_channels=hidden_dim, 
-                                            aggr='mean'),
-            ('ego', 'to', 'goal'): SAGEConv(in_channels=(hidden_dim, hidden_dim), 
-                out_channels=hidden_dim, 
-                aggr='mean')
-        }, aggr='sum') # 将斥力场的障碍物特征与引力场的目标特征在自车节点处实施物理求和
-        
-        # 强力跨模态特征多层融合精炼
-        self.fusion = nn.Sequential(
-            nn.Linear(2*hidden_dim, hidden_dim),
+        # 各分支编码器
+        self.geo_encoder = GeometricEncoder(hidden_dim=hidden_dim, k=5)
+        self.state_encoder = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim*2),
+            nn.LayerNorm(hidden_dim*2),
+            nn.GELU(),
+            nn.Linear(hidden_dim*2, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.LeakyReLU(0.1),
-            nn.Dropout(0.2)
+            #nn.Dropout(0.2)
+        )
+        # self.state_encoder = nn.Sequential(
+        #     nn.Linear(state_dim, hidden_dim),
+        #     nn.LayerNorm(hidden_dim),
+        #     nn.GELU(),
+        #     nn.Linear(hidden_dim, hidden_dim),
+        #     nn.LayerNorm(hidden_dim),
+        #     #nn.Dropout(0.2)
+        # )
+        
+        # 跨模态特征融合层
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim*2, hidden_dim*2),
+            nn.LayerNorm(hidden_dim*2),
+            nn.GELU(),
+            #nn.Dropout(0.3),
+            nn.Linear(hidden_dim*2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU()
         )
         
-        # -----------------------------------------------------------------
-        # 解耦多任务直出头 (Decoupled Heads)
-        # -----------------------------------------------------------------
-        self.action_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LeakyReLU(0.1),
-            nn.Linear(hidden_dim // 2, 2)  # 输出 (v, omega)
+        # 控制策略输出头 (单任务直出 2 维标称动作量)
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim//2, 2),
+            nn.Tanh()  # 输出连续物理空间的标称期望 (v_nom, w_nom)
         )
+        # self.head = nn.Sequential(
+        #     nn.Linear(hidden_dim, hidden_dim//2),
+        #     nn.SiLU(),
+        #     nn.Linear(hidden_dim//2, 32),
+        #     nn.SiLU(),
+        #     nn.Linear(32,2)  # 输出连续物理空间的标称期望 (v_nom, w_nom)
+        # )
+        
+        # 固锁可微安全阻尼过滤层
+        self.safety_layer = DifferentiableSdfCdfSafetyLayer6D(lambda_smooth=25)
 
-        self.risk_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LeakyReLU(0.1),
-            nn.Linear(hidden_dim // 2, 1),
-            nn.Sigmoid()  # 约束物理风险概率场强在 [0, 1] 空间内
-        )
-
-    def forward(self, batch):
+    def forward(self, state, points, G_cdf, h_cdf):
         """
-        前向计算流只接收一个完全自治、统一的大图 batch 对象。
+        前向传播接口：
+          训练端调用：pred_sol_6d = model(batch.state, batch, batch.G_cdf, batch.h_cdf)
         """
-        # 1. 实体特征进行高维编码
-        e_feat = self.ego_encoder(batch['ego'].x)      # [Batch_Size, hidden_dim]
-        g_f = self.goal_encoder(batch['goal'].x)        # [Batch_Size, hidden_dim]
+        # 1. 深度级联两路异质输入特征
+        geo_feat = self.geo_encoder(points)      # [Batch_Size, hidden_dim]
+        state_feat = self.state_encoder(state)    # [Batch_Size, hidden_dim]
         
-        # 防御性编程：兼容全图无障碍点云雷达数据流空值情况
-        if batch['point'].x.shape[0] == 0:
-            p_f = torch.zeros((0, e_feat.shape[1]), device=e_feat.device, dtype=e_feat.dtype)
-        else:
-            p_f = self.point_encoder(batch['point'].x)  # [Total_Points, hidden_dim]
+        # 2. 空间几何特征与动态状态深度交融
+        fused = self.fusion(torch.cat([geo_feat, state_feat], dim=1)) # [Batch_Size, hidden_dim*2]
         
-        # 2. 激发图消息流流转
-        h_dict = self.hetero_conv(
-            x_dict={'ego': e_feat, 'goal': g_f, 'point': p_f},
-            edge_index_dict=batch.edge_index_dict
-        )
-
-        ego_final = e_feat + h_dict['ego'] if 'ego' in h_dict else e_feat
-        goal_final = g_f + h_dict['goal'] if 'goal' in h_dict else g_f
+        # 3. 策略网络原生直出的狂野名义控制量
+        u_nom = self.head(fused)*1.2 # [Batch_Size, 2]
         
-        # 跨层拼接：不论点云是否有值，目标意图高维特征都在特征头占有一席之地
-        combined_feat = torch.cat([ego_final, goal_final], dim=1)
+        # 4. 🚨 让动作名义量和空间 6维约束场强送入安全拦截大闸，前向求解 6维 QP，反向隐式传梯
+        u_safe = self.safety_layer(u_nom, G_cdf, h_cdf) # [Batch_Size, 6]
         
-        # 4. 多模态精炼融合与双头输出
-        fused_feat = self.fusion(combined_feat)
-        
-        # 提取汇聚后自车节点特征，此时维度在数学上全自动对齐自车批次大小: [Batch_Size, hidden_dim]
-        # fused_feat = self.fusion(h_dict['ego'])
-        
-        # 3. 双头多任务同步前向输出
-        action = self.action_head(fused_feat)  # [Batch_Size, 2]
-        risk = self.risk_head(fused_feat)      # [Batch_Size, 1]
-        
-        return action, risk
+        return u_safe
