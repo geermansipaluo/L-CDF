@@ -1,0 +1,91 @@
+<?xml version="1.0"?>
+
+<launch>
+    <!-- ============================================================
+         DensityNet 批量评测专用 launch
+         用法示例：
+         roslaunch scene dynamic_eval.launch \
+             model_path:=/home/guo/L-CDF/src/sensor_cdf/scripts/save_models/DensityNet-demo2-dseed0-seed0/model_best_parametric_bc.pt \
+             num_demos:=2 demo_seed:=0 train_seed:=0 \
+             output_csv:=/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv
+         ============================================================ -->
+
+    <!-- 评测参数 -->
+    <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/save_models/DensityNet-demo2-dseed0-seed0/model_best_parametric_bc.pt" />
+    <arg name="output_csv" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv" />
+    <arg name="trajectory_save_dir" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories" />
+
+    <arg name="num_demos" default="-1" />
+    <arg name="demo_seed" default="-1" />
+    <arg name="train_seed" default="-1" />
+
+    <arg name="num_eval_episodes" default="10" />
+    <arg name="test_target_seed" default="2026" />
+    <arg name="max_episode_time" default="80.0" />
+
+    <arg name="target_x_min" default="14.0" />
+    <arg name="target_x_max" default="16.0" />
+    <arg name="target_y_min" default="-2.0" />
+    <arg name="target_y_max" default="2.0" />
+    <arg name="goal_radius" default="0.4" />
+    <arg name="terminate_on_collision" default="false" />
+
+    <!-- 批量跑时建议 false；单独看轨迹时可以 roslaunch ... use_rviz:=true -->
+    <arg name="use_rviz" default="false" />
+
+    <include file="$(find scene)/launch/start.launch">
+        <arg name="world" value="$(find scene)/worlds/world.world" />
+    </include>
+
+    <include file="$(find jackal_description)/launch/description.launch" />
+
+    <include file="$(find jackal_control)/launch/control.launch">
+        <arg name="enable_ekf" value="false" />
+    </include>
+
+    <include file="$(find jackal_control)/launch/teleop.launch">
+        <arg name="joystick" value="false" />
+    </include>
+
+    <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
+          args="-urdf -model jackal -param robot_description -x 0 -y 0 -z 1.0" />
+
+    <include file="$(find local_map)/launch/for_simulation.launch" />
+
+    <node pkg="obs_param" type="obs_kf" output="screen" name="obs_kf" />
+
+    <!-- 批量评测核心节点：required=true 保证评测完成后 roslaunch 自动关闭本轮仿真 -->
+    <node name="traj_eval_sweep" pkg="sensor_cdf" type="traj_eval_sweep.py" output="screen" required="true">
+        <param name="model_path" value="$(arg model_path)" />
+        <param name="output_csv" value="$(arg output_csv)" />
+        <param name="trajectory_save_dir" value="$(arg trajectory_save_dir)" />
+
+        <param name="num_demos" type="int" value="$(arg num_demos)" />
+        <param name="demo_seed" type="int" value="$(arg demo_seed)" />
+        <param name="train_seed" type="int" value="$(arg train_seed)" />
+
+        <param name="num_eval_episodes" type="int" value="$(arg num_eval_episodes)" />
+        <param name="test_target_seed" type="int" value="$(arg test_target_seed)" />
+        <param name="max_episode_time" type="double" value="$(arg max_episode_time)" />
+
+        <param name="target_x_min" type="double" value="$(arg target_x_min)" />
+        <param name="target_x_max" type="double" value="$(arg target_x_max)" />
+        <param name="target_y_min" type="double" value="$(arg target_y_min)" />
+        <param name="target_y_max" type="double" value="$(arg target_y_max)" />
+        <param name="goal_radius" type="double" value="$(arg goal_radius)" />
+        <param name="terminate_on_collision" type="bool" value="$(arg terminate_on_collision)" />
+    </node>
+
+    <node name="update_state" pkg="sensor_cdf" type="update_state.py" />
+    <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py" />
+    <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py" />
+
+    <node name="perfect_lidar_bridge" pkg="sensor_cdf" type="perfect_lidar_bridge.py" output="screen">
+        <param name="num_rays" value="256" />
+        <param name="max_range" value="3.0" />
+    </node>
+
+    <node if="$(arg use_rviz)" name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find scene)/rviz_config/simulation.rviz" />
+
+</launch>
