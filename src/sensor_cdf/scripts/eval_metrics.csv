@@ -1,0 +1,14 @@
+num_demos,demo_seed,train_seed,num_eval_episodes,test_target_seed,arrival_count,success_count,collision_runs_count,collision_events,timeout_runs_count,arrival_rate,success_rate,collision_rate,avg_collision_events,model_path
+2,0,0,10,2026,9,0,10,192,1,0.9,0.0,1.0,19.2,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo2-dseed0-seed0/model_best_parametric_bc.pt
+2,1,1,10,2026,10,3,7,43,0,1.0,0.3,0.7,4.3,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo2-dseed1-seed1/model_best_parametric_bc.pt
+2,2,2,10,2026,10,0,10,50,0,1.0,0.0,1.0,5.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo2-dseed2-seed2/model_best_parametric_bc.pt
+8,0,0,10,2026,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo8-dseed0-seed0/model_best_parametric_bc.pt
+8,1,1,10,2026,10,4,6,39,0,1.0,0.4,0.6,3.9,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo8-dseed1-seed1/model_best_parametric_bc.pt
+8,2,2,10,2026,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo8-dseed2-seed2/model_best_parametric_bc.pt
+16,0,0,10,2026,10,9,1,2,0,1.0,0.9,0.1,0.2,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo16-dseed0-seed0/model_best_parametric_bc.pt
+16,1,1,10,2026,9,9,0,0,1,0.9,0.9,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo16-dseed1-seed1/model_best_parametric_bc.pt
+16,2,2,10,2026,8,7,2,102,2,0.8,0.7,0.2,10.2,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo16-dseed2-seed2/model_best_parametric_bc.pt
+32,0,0,10,2026,10,4,6,24,0,1.0,0.4,0.6,2.4,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo32-dseed0-seed0/model_best_parametric_bc.pt
+32,1,1,10,2026,10,9,1,1,0,1.0,0.9,0.1,0.1,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo32-dseed1-seed1/model_best_parametric_bc.pt
+32,2,2,10,2026,10,6,4,18,0,1.0,0.6,0.4,1.8,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo32-dseed2-seed2/model_best_parametric_bc.pt
+48,0,0,10,2026,10,5,5,15,0,1.0,0.5,0.5,1.5,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
