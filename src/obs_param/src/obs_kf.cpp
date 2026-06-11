@@ -206,7 +206,7 @@ void curve_fitting(obs_kf& obs, std_msgs::Float32MultiArray& obs_pub, vector<Ell
 
 void obscb(const std_msgs::Float32MultiArray::ConstPtr& msg)
 {
-  ROS_INFO("[node] receive the obs track");
+  // ROS_INFO("[node] receive the obs track");
   if (msg->data.empty())
     return;
 

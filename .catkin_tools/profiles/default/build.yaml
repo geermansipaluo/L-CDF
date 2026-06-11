@@ -2,8 +2,7 @@ authors: []
 blacklist: []
 build_space: build
 catkin_make_args: []
-cmake_args:
-- -DPYTHON_EXECUTABLE=/home/guo/anaconda3/envs/cdflearn/bin/python
+cmake_args: []
 devel_layout: linked
 devel_space: devel
 extend_path: null

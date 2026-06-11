@@ -8,6 +8,8 @@
 
 # modified environment variables
 export CMAKE_PREFIX_PATH="/home/guo/L-CDF/devel/.private/jackal_control:$CMAKE_PREFIX_PATH"
+export LD_LIBRARY_PATH="/home/guo/L-CDF/devel/.private/jackal_control/lib:$LD_LIBRARY_PATH"
+export PKG_CONFIG_PATH="/home/guo/L-CDF/devel/.private/jackal_control/lib/pkgconfig:$PKG_CONFIG_PATH"
 export PWD='/home/guo/L-CDF/build/jackal_control'
 export ROSLISP_PACKAGE_DIRECTORIES="/home/guo/L-CDF/devel/.private/jackal_control/share/common-lisp:$ROSLISP_PACKAGE_DIRECTORIES"
 export ROS_PACKAGE_PATH="/home/guo/L-CDF/src/jackal/jackal_control:$ROS_PACKAGE_PATH"

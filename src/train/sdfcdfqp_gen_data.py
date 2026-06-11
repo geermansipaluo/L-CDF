@@ -66,7 +66,7 @@ def smooth_bump(c, b):
 
 @jit
 def get_local_sdf_rho_and_psi(pos_p_local, target_local, local_pc_valid):
-    r_ego = 0.51 + 0.15
+    r_ego = 0.46 + 0.15
     sense_range = 3.0  
     
     dists = jnp.sqrt(jnp.sum((local_pc_valid - pos_p_local)**2, axis=1))
@@ -121,7 +121,7 @@ class LocalSdfCdfPlanner:
         rho_z2 = density_wrapper_local(z2_pos)
 
         dim_total = 6
-        lambda_smooth = 25  # 维持你测试最好的参数 1
+        lambda_smooth = 25
         H = jnp.zeros((dim_total, dim_total))
         val_uu = 2.0 * (1.0 + 2.0 * lambda_smooth)
         val_zz = 2.0 * lambda_smooth
@@ -162,196 +162,403 @@ class LocalSdfCdfPlanner:
         h_extracted = np.array(b_vec_j, dtype=np.float32).reshape(1)
         return sol_raw_j, G_extracted, h_extracted
 
+def build_obstacle_surface_pointcloud(meta_obstacles, num_points_per_obs=150):
+    """
+    构造全局障碍物表面点云。
+    这个点云只用于专家 CDF-QP 控制，不直接作为训练输入保存。
+    """
+    obs_pc_list = []
+    angles = np.linspace(0, 2 * np.pi, num_points_per_obs)
+
+    for obs in meta_obstacles:
+        if obs['type'] == 'rect':
+            c_x, c_y = obs['center'][0], obs['center'][1]
+            a, b = obs['a'], obs['b']
+
+            # 超椭圆边界，和 png 版本保持一致
+            cos_t = np.cos(angles)
+            sin_t = np.sin(angles)
+
+            rect_x = c_x + a * np.sign(cos_t) * np.sqrt(np.abs(cos_t))
+            rect_y = c_y + b * np.sign(sin_t) * np.sqrt(np.abs(sin_t))
+
+            rect_pc = np.column_stack([rect_x, rect_y])
+            obs_pc_list.append(rect_pc)
+
+        elif obs['type'] == 'circle':
+            c_x, c_y = obs['center'][0], obs['center'][1]
+            r = obs['r']
+
+            circle_pc = np.column_stack([
+                c_x + r * np.cos(angles),
+                c_y + r * np.sin(angles)
+            ])
+
+            obs_pc_list.append(circle_pc)
+
+    if len(obs_pc_list) == 0:
+        return np.zeros((1, 2), dtype=np.float32)
+
+    return np.vstack(obs_pc_list).astype(np.float32)
+
 # =========================================================================
 # 主批量场景迭代推演控制大闸
 # =========================================================================
 if __name__ == '__main__':
-    R_EGO = 0.31  
-    L = 0.6          
-    dt = 0.05          
-    total_steps = 2500 
-    
+    R_EGO = 0.31
+    L = 0.4
+    dt = 0.05
+    total_steps = 2500
+
+    # 每个环境生成多少条随机目标轨迹
+    # 10个环境 × 8条 = 最多80条轨迹
+    # 后面画 demonstrations = [5, 10, 20, 30, 40, 48] 足够用
+    num_demos_per_env = 6
+
+    # 随机目标范围
+    target_x_min, target_x_max = 14.0, 16.0
+    target_y_min, target_y_max = -2.0, 2.0
+
+    # 固定随机种子，保证每次生成的数据可复现
+    rng = np.random.default_rng(0)
+
     # 创建图片保存根目录
-    img_dir = "dataset_png"
+    img_dir = "dataset_png_random_target"
     if not os.path.exists(img_dir):
         os.makedirs(img_dir)
-        
+
     planner = LocalSdfCdfPlanner()
     env_pool = get_env_pool()
-    
-    # 建立全局大合拢缓存区
-    global_dataset_buffer = []
 
-    print(f"============================================================")
-    print(f"🚀 启动全场景泛化大闸！共计探测到 {len(env_pool)} 个异质多态环境...")
-    print(f"============================================================\n")
+    # ============================================================
+    # 关键修改：
+    # 这里不再保存为 global_dataset_buffer = []
+    # 而是保存为 trajectory-level buffer
+    #
+    # 每个元素是一条完整轨迹：
+    # {
+    #   'env_id': int,
+    #   'demo_id': int,
+    #   'target': np.array([tx, ty]),
+    #   'num_frames': int,
+    #   'frames': [frame_0, frame_1, ...],
+    #   'history_x': [...],
+    #   'history_y': [...]
+    # }
+    # ============================================================
+    global_trajectory_buffer = []
+
+    print("=" * 70)
+    print(f"🚀 启动随机目标轨迹级专家数据生成")
+    print(f"   环境数量: {len(env_pool)}")
+    print(f"   每个环境随机目标轨迹数: {num_demos_per_env}")
+    print(f"   目标x范围: [{target_x_min}, {target_x_max}]")
+    print(f"   目标y范围: [{target_y_min}, {target_y_max}]")
+    print(f"   理论最大轨迹数: {len(env_pool) * num_demos_per_env}")
+    print("=" * 70 + "\n")
 
     for env_id, env_cfg in enumerate(env_pool):
-        print(f"⏳ 正在拉起 [场景 {env_id}/9] 运动学求解链条...")
-        
-        my_target = env_cfg['target']
+        print(f"\n==================== 场景 {env_id}/{len(env_pool)-1} ====================")
+
         meta_obstacles = env_cfg['meta_obstacles']
+
         # 转换为JAX高速静态张量
+        # 障碍物保持不变，只随机目标
         obs_tensors = convert_to_jax_tensors(meta_obstacles)
-        
-        ego_state = jnp.array([0.0, 0.0, 0.0]) # 起点严格锁定在 [0,0,0]
-        episode_buffer = []
-        is_episode_safe = True
 
-        history_x = []
-        history_y = []
-        last_frame_lidar_world = None  
+        obs_pc_world_for_control = build_obstacle_surface_pointcloud(
+            meta_obstacles,
+            num_points_per_obs=150
+        )
 
-        last_executed_ux = 0.0
-        last_executed_uy = 0.0
-        
-        for step in range(total_steps):
-            x, y, theta = float(ego_state[0]), float(ego_state[1]), float(ego_state[2])
-            history_x.append(x)
-            history_y.append(y)
+        for demo_id in range(num_demos_per_env):
+            # ============================================================
+            # 1. 为当前环境随机生成一个目标点
+            # ============================================================
+            my_target = np.array([
+                rng.uniform(target_x_min, target_x_max),
+                rng.uniform(target_y_min, target_y_max)
+            ], dtype=np.float32)
 
-            # --- 2. 🟢【核心修正：散射256线物理激光雷达】 ---
-            # 先发射雷达射线，因为我们要用雷达点阵来做 100% 精确的超椭圆硬碰撞审计
-            pos_ego_world = jnp.array([x, y])
-            local_pc_all, valid_hit_mask = simulate_parametric_lidar_256(
-                pos_ego_world, theta, obs_tensors, num_rays=256, max_range=3.0
+            print(
+                f"\n⏳ 正在生成轨迹: env={env_id}, demo={demo_id}, "
+                f"target=({my_target[0]:.3f}, {my_target[1]:.3f})"
             )
-            
-            valid_mask_np = np.array(valid_hit_mask)
-            current_pc_local = np.array(local_pc_all)[valid_mask_np] 
 
-            # --- 1. 🟢【核心修正：硬碰撞安全审计大闸】 ---
-            # 拒绝代数错配！如果雷达探测到的障碍物距离小于等于车体刚体半径，判定为碰撞
-            if current_pc_local.shape[0] > 0:
-                # 计算局部载体系下所有击中点到车中心的欧氏距离
-                distances_to_ego = np.linalg.norm(current_pc_local, axis=1)
-                if np.min(distances_to_ego) <= (R_EGO + 1e-3):
-                    is_episode_safe = False
-                    
-            if not is_episode_safe:
-                print(f"    ❌ [碰撞熔断] 场景 {env_id} 突发超椭圆边际挂蹭，本回合轨迹作废！")
-                break
+            # 起点严格锁定在 [0, 0, 0]
+            ego_state = jnp.array([0.0, 0.0, 0.0])
 
-            if current_pc_local.shape[0] > 0:
-                rot_mat = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
-                last_frame_lidar_world = (rot_mat @ current_pc_local.T).T + np.array([x, y])
-            else:
-                last_frame_lidar_world = None
+            # 当前轨迹的数据缓存
+            episode_buffer = []
 
-            is_empty = (current_pc_local.shape[0] == 0)
+            # 当前轨迹状态标记
+            is_episode_safe = True
+            is_episode_success = False
 
-            # --- 3. 局部系相对导航目标结算 ---
-            dx_tg = float(my_target[0]) - x; dy_tg = float(my_target[1]) - y
-            target_local_x = dx_tg * np.cos(theta) + dy_tg * np.sin(theta)
-            target_local_y = -dx_tg * np.sin(theta) + dy_tg * np.cos(theta)
-            target_local = jnp.array([target_local_x, target_local_y])
+            # 可视化与调试用轨迹历史
+            history_x = []
+            history_y = []
+            last_frame_lidar_world = None
 
-            ego_p_local = jnp.array([L, 0.0])
-            target_vector_local = target_local - ego_p_local
-            dist_local = jnp.linalg.norm(target_vector_local)
-            u_nom_local = jnp.where(dist_local > 0.1, 1.2 * target_vector_local / (dist_local + 1e-6), jnp.zeros(2))
+            # 上一帧执行控制，用于构造 X_frame
+            last_executed_ux = 0.0
+            last_executed_uy = 0.0
 
-            # --- 4. 门控过滤与松弛数据落盘 ---
-            if is_empty:
-                v_qp = float(u_nom_local[0]); omega_qp = float(u_nom_local[1] / L)
-                last_executed_ux = u_nom_local[0]
-                last_executed_uy = u_nom_local[1]
-            else:
-                current_pc_local_j = jnp.array(current_pc_local)
-                sol_6d_raw, G_extracted, h_extracted = planner.solve_agent_qp_local(
-                    ego_p_local, u_nom_local, current_pc_local_j, target_local
+            for step in range(total_steps):
+                x = float(ego_state[0])
+                y = float(ego_state[1])
+                theta = float(ego_state[2])
+
+                # ========================================================
+                # A. 控制器专用点云：不受 3m 限制，用全局障碍物表面点云
+                # ========================================================
+                dx_pc_ctrl = obs_pc_world_for_control[:, 0] - x
+                dy_pc_ctrl = obs_pc_world_for_control[:, 1] - y
+
+                control_pc_local_x = dx_pc_ctrl * np.cos(theta) + dy_pc_ctrl * np.sin(theta)
+                control_pc_local_y = -dx_pc_ctrl * np.sin(theta) + dy_pc_ctrl * np.cos(theta)
+
+                current_pc_control_local = np.column_stack([
+                    control_pc_local_x,
+                    control_pc_local_y
+                ]).astype(np.float32)
+
+                # 可选：只取距离车体最近的 K 个点，减少 QP/JAX 负担
+                # 注意这里是控制用点云，不是保存到数据集的观测点云
+                K_CONTROL = min(256, current_pc_control_local.shape[0])
+
+                dist_to_ego_local = np.linalg.norm(
+                    current_pc_control_local - np.array([L, 0.0], dtype=np.float32),
+                    axis=1
                 )
-                v_qp = float(sol_6d_raw[0]); omega_qp = float(sol_6d_raw[1])/L
 
-                control_residual = np.linalg.norm(np.array(sol_6d_raw[:2]) - np.array(u_nom_local))
-                should_record_frame = (control_residual > 0.05) or (np.random.rand() < 0.40)
+                nearest_idx = np.argpartition(dist_to_ego_local, K_CONTROL - 1)[:K_CONTROL]
+                current_pc_control_local = current_pc_control_local[nearest_idx]
 
-                if should_record_frame:
-                    X_frame = np.array([target_local_x, target_local_y, last_executed_ux, last_executed_uy], dtype=np.float32)
-                    Y_frame = np.concatenate([
-                        [float(sol_6d_raw[0])],
-                        [float(sol_6d_raw[1])],   
-                        G_extracted.flatten(), 
-                        h_extracted.flatten()  
-                    ]).astype(np.float32)
-                    
-                    episode_buffer.append({
-                        'X': X_frame, 'Y': Y_frame, 'z': np.array(current_pc_local, dtype=np.float32)
-                    })
-                last_executed_ux = sol_6d_raw[0]
-                last_executed_uy = sol_6d_raw[1]
-            
-            # --- 5. 单轴前推 ---
-            new_x = x + v_qp * np.cos(theta) * dt
-            new_y = y + v_qp * np.sin(theta) * dt
-            new_theta = theta + omega_qp * dt
-            ego_state = jnp.array([new_x, new_y, new_theta])
+                history_x.append(x)
+                history_y.append(y)
 
-            if np.hypot(x - my_target[0], y - my_target[1]) < 0.4:
-                print(f"    🎯 [胜利会师] 小车成功抵达场景 {env_id} 的终点刹车区！")
-                break
+                # ========================================================
+                # 2. 256线物理激光雷达模拟
+                # ========================================================
+                pos_ego_world = jnp.array([x, y])
 
-        # --- 6. 场景级独立图纸固化及数据收拢 ---
-        if is_episode_safe and len(episode_buffer) > 0:
-            global_dataset_buffer.extend(episode_buffer)
-            print(f"    📥 成功收拢场景 {env_id} 的有效专家数据: {len(episode_buffer)} 帧")
+                local_pc_all, valid_hit_mask = simulate_parametric_lidar_256(
+                    pos_ego_world,
+                    theta,
+                    obs_tensors,
+                    num_rays=256,
+                    max_range=3.0
+                )
 
-            # fig, ax = plt.subplots(figsize=(12, 6))
-            
-            # # 🟢【核心修正：Matplotlib 场景障碍物参数化圆角渲染】
-            # angles_draw = np.linspace(0, 2*np.pi, 200)
-            # for obs in meta_obstacles:
-            #     if obs['type'] == 'rect':
-            #         # 像素级还原 n=4 的超椭圆精细圆角轮廓
-            #         cos_t = np.cos(angles_draw)
-            #         sin_t = np.sin(angles_draw)
-            #         ex = obs['center'][0] + obs['a'] * np.sign(cos_t) * np.sqrt(np.abs(cos_t))
-            #         ey = obs['center'][1] + obs['b'] * np.sign(sin_t) * np.sqrt(np.abs(sin_t))
-            #         ax.fill(ex, ey, facecolor='tomato', edgecolor='darkred', alpha=0.8, zorder=1)
-            #     elif obs['type'] == 'circle':
-            #         circle = Circle(
-            #             (obs['center'][0], obs['center'][1]), obs['r'], 
-            #             facecolor='coral', edgecolor='darkred', alpha=0.8, zorder=1
-            #         )
-            #         ax.add_patch(circle)
+                valid_mask_np = np.array(valid_hit_mask)
+                current_pc_local = np.array(local_pc_all)[valid_mask_np]
 
-            # ax.plot(history_x, history_y, color='royalblue', linewidth=2.5, label='Ego Trajectory')
-            # ax.scatter(history_x[0], history_y[0], color='green', marker='o', s=150, zorder=5, label='Start')
-            # ax.scatter(my_target[0], my_target[1], color='gold', marker='*', s=200, zorder=5, edgecolor='orange', label='Target')
+                # ========================================================
+                # 3. 硬碰撞安全审计
+                # ========================================================
+                if current_pc_local.shape[0] > 0:
+                    distances_to_ego = np.linalg.norm(current_pc_local, axis=1)
 
-            # ego_final_circle = Circle(
-            #     (history_x[-1], history_y[-1]), R_EGO, 
-            #     facecolor='none', edgecolor='blue', linestyle='--', linewidth=1.5, label='Ego Size (R_ego)'
-            # )
-            # ax.add_patch(ego_final_circle)
+                    if np.min(distances_to_ego) <= (R_EGO + 1e-3):
+                        is_episode_safe = False
+                        print(
+                            f"    ❌ [碰撞熔断] env={env_id}, demo={demo_id}, "
+                            f"step={step}, min_dist={np.min(distances_to_ego):.4f}"
+                        )
+                        break
 
-            # if last_frame_lidar_world is not None:
-            #     ax.scatter(
-            #         last_frame_lidar_world[:, 0], last_frame_lidar_world[:, 1], 
-            #         color='lime', s=2, alpha=0.6, zorder=4, label='LiDAR Hits (Last Frame)'
-            #     )
+                # 保存最后一帧雷达点的世界坐标，仅用于可视化
+                if current_pc_local.shape[0] > 0:
+                    rot_mat = np.array([
+                        [np.cos(theta), -np.sin(theta)],
+                        [np.sin(theta),  np.cos(theta)]
+                    ])
+                    last_frame_lidar_world = (
+                        rot_mat @ current_pc_local.T
+                    ).T + np.array([x, y])
+                else:
+                    last_frame_lidar_world = None
 
-            # ax.set_title(f"Scene {env_id} - Trajectory Evaluation & LiDAR Performance", fontsize=14, fontweight='bold')
-            # ax.set_xlabel("World X (m)", fontsize=12)
-            # ax.set_ylabel("World Y (m)", fontsize=12)
-            # ax.grid(True, linestyle=':', alpha=0.6)
-            # ax.set_aspect('equal', adjustable='box')
-            
-            # handles, labels = ax.get_legend_handles_labels()
-            # by_label = dict(zip(labels, handles))
-            # ax.legend(by_label.values(), by_label.keys(), loc='upper left')
+                is_empty = current_pc_local.shape[0] == 0
 
-            # plt.tight_layout()
-            # output_plot_path = os.path.join(img_dir, f"trajectory_scene_{env_id}.png")
-            # plt.savefig(output_plot_path, dpi=200)
-            # plt.close()
-            # print(f"    📊 场景图像可视化归档成功 -> {output_plot_path}\n")
+                # ========================================================
+                # 4. 局部系相对目标
+                # ========================================================
+                dx_tg = float(my_target[0]) - x
+                dy_tg = float(my_target[1]) - y
 
-    # 全链路落盘
-    if len(global_dataset_buffer) > 0:
-        print("\n" + "="*70)
-        print(f"🎉 泛化大功告成！全链路成功收拢 {len(env_pool)} 个多态环境。")
-        print(f"💾 正在固化跨场景混合数据集，总计包含 {len(global_dataset_buffer)} 帧高清晰专家控制对齐资产...")
-        torch.save(global_dataset_buffer, "dataset_degenerate_test_10.pt")
-        print("✅ 固化泛化训练文件已全面闭环落盘：dataset_degenerate_test_10.pt")
-        print("="*70 + "\n")
+                target_local_x = dx_tg * np.cos(theta) + dy_tg * np.sin(theta)
+                target_local_y = -dx_tg * np.sin(theta) + dy_tg * np.cos(theta)
+                target_local = jnp.array([target_local_x, target_local_y])
+
+                ego_p_local = jnp.array([L, 0.0])
+                target_vector_local = target_local - ego_p_local
+                dist_local = jnp.linalg.norm(target_vector_local)
+
+                u_nom_local = jnp.where(
+                    dist_local > 0.1,
+                    1.2 * target_vector_local / (dist_local + 1e-6),
+                    jnp.zeros(2)
+                )
+
+                # ========================================================
+                # 5. 专家控制求解 + 数据记录
+                # ========================================================
+                if is_empty:
+                    # v_qp = float(u_nom_local[0])
+                    # omega_qp = float(u_nom_local[1] / L)
+
+                    # last_executed_ux = float(u_nom_local[0])
+                    # last_executed_uy = float(u_nom_local[1])
+                    # ========================================================
+                    # 无论 3m 内有没有观测点云，专家控制都始终走 CDF-QP
+                    # ========================================================
+                    current_pc_control_j = jnp.array(current_pc_control_local)
+
+                    sol_6d_raw, G_extracted, h_extracted = planner.solve_agent_qp_local(
+                        ego_p_local,
+                        u_nom_local,
+                        current_pc_control_j,
+                        target_local
+                    )
+
+                    v_qp = float(sol_6d_raw[0])
+                    omega_qp = float(sol_6d_raw[1]) / L
+                    last_executed_ux = float(sol_6d_raw[0])
+                    last_executed_uy = float(sol_6d_raw[1])
+
+                else:
+                    current_pc_local_j = jnp.array(current_pc_local)
+
+                    sol_6d_raw, G_extracted, h_extracted = planner.solve_agent_qp_local(
+                        ego_p_local,
+                        u_nom_local,
+                        current_pc_local_j,
+                        target_local
+                    )
+
+                    v_qp = float(sol_6d_raw[0])
+                    omega_qp = float(sol_6d_raw[1]) / L
+
+                    # 与原代码一致：
+                    # 避障控制变化明显时必记；
+                    # 其他时候以一定概率记录，避免数据全是危险状态
+                    control_residual = np.linalg.norm(
+                        np.array(sol_6d_raw[:2]) - np.array(u_nom_local)
+                    )
+
+                    # should_record_frame = (
+                    #     control_residual > 0.05
+                    # ) or (
+                    #     np.random.rand() < 0.40
+                    # )
+                    should_record_frame = True
+
+                    if should_record_frame:
+                        X_frame = np.array([
+                            target_local_x,
+                            target_local_y,
+                            last_executed_ux,
+                            last_executed_uy
+                        ], dtype=np.float32)
+
+                        Y_frame = np.concatenate([
+                            [float(sol_6d_raw[0])],
+                            [float(sol_6d_raw[1])],
+                            G_extracted.flatten(),
+                            h_extracted.flatten()
+                        ]).astype(np.float32)
+
+                        episode_buffer.append({
+                            'X': X_frame,
+                            'Y': Y_frame,
+                            'z': np.array(current_pc_local, dtype=np.float32),
+
+                            # 下面这些不是必须训练用，但后面调试很有用
+                            'env_id': env_id,
+                            'demo_id': demo_id,
+                            'step': step,
+                            'target': my_target.astype(np.float32),
+                            'ego_state': np.array([x, y, theta], dtype=np.float32),
+                            'control_residual': np.float32(control_residual)
+                        })
+
+                    last_executed_ux = float(sol_6d_raw[0])
+                    last_executed_uy = float(sol_6d_raw[1])
+
+                # ========================================================
+                # 6. 单轴前推
+                # ========================================================
+                new_x = x + v_qp * np.cos(theta) * dt
+                new_y = y + v_qp * np.sin(theta) * dt
+                new_theta = theta + omega_qp * dt
+
+                ego_state = jnp.array([new_x, new_y, new_theta])
+
+                # ========================================================
+                # 7. 到达目标判定
+                # ========================================================
+                dist_to_target = np.hypot(x - my_target[0], y - my_target[1])
+
+                if dist_to_target < 0.44:
+                    is_episode_success = True
+                    print(
+                        f"    🎯 [成功到达] env={env_id}, demo={demo_id}, "
+                        f"step={step}, frames={len(episode_buffer)}, "
+                        f"dist={dist_to_target:.3f}"
+                    )
+                    break
+
+            # ============================================================
+            # 8. 当前轨迹结束后，决定是否保存
+            # ============================================================
+            if is_episode_safe and is_episode_success and len(episode_buffer) > 0:
+                trajectory_record = {
+                    'env_id': env_id,
+                    'demo_id': demo_id,
+                    'target': my_target.astype(np.float32),
+                    'num_frames': len(episode_buffer),
+                    'frames': episode_buffer,
+                    'history_x': np.array(history_x, dtype=np.float32),
+                    'history_y': np.array(history_y, dtype=np.float32)
+                }
+
+                global_trajectory_buffer.append(trajectory_record)
+
+                print(
+                    f"    📥 [轨迹保存] env={env_id}, demo={demo_id}, "
+                    f"target=({my_target[0]:.3f}, {my_target[1]:.3f}), "
+                    f"frames={len(episode_buffer)}, "
+                    f"当前总轨迹数={len(global_trajectory_buffer)}"
+                )
+
+            else:
+                print(
+                    f"    ⚠️ [轨迹丢弃] env={env_id}, demo={demo_id}, "
+                    f"safe={is_episode_safe}, success={is_episode_success}, "
+                    f"frames={len(episode_buffer)}"
+                )
+
+    # ============================================================
+    # 10. 全部轨迹保存
+    # ============================================================
+    if len(global_trajectory_buffer) > 0:
+        output_dataset_path = "dataset_trajectories.pt"
+
+        print("\n" + "=" * 70)
+        print(f"🎉 随机目标专家轨迹生成完成")
+        print(f"   成功保存轨迹数: {len(global_trajectory_buffer)}")
+
+        total_frames = sum(traj['num_frames'] for traj in global_trajectory_buffer)
+        print(f"   总帧数: {total_frames}")
+
+        torch.save(global_trajectory_buffer, output_dataset_path)
+
+        print(f"💾 轨迹级数据集已保存: {output_dataset_path}")
+        print("=" * 70 + "\n")
+
+    else:
+        print("\n" + "=" * 70)
+        print("❌ 没有生成任何成功且安全的轨迹，未保存数据集。")
+        print("=" * 70 + "\n")

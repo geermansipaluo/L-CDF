@@ -27,7 +27,7 @@ def smooth_bump(c, b):
 
 @jit
 def get_local_sdf_rho_and_psi(pos_p_local, target_local, local_pc):
-    r_ego = 0.51 + 0.15
+    r_ego = 0.46 + 0.15
     sense_range = 3.0  
     num_pts = local_pc.shape[0]
     
@@ -126,7 +126,7 @@ if __name__ == '__main__':
     # 🟢 核心改动 1：拉起场景池，并让用户手动选择需要调试的环境 ID
     env_pool = get_env_pool()
     print(f"📊 当前环境池总计包含 {len(env_pool)} 个场景 (0 ~ {len(env_pool)-1})。")
-    ENV_ID = 5
+    ENV_ID = 0
     print(f"\n⏳ 正在拉起 [场景 {ENV_ID}] 的纯局部载体系时空博弈仿真...")
     env_cfg = env_pool[ENV_ID]
     my_target = jnp.array(env_cfg['target'])
@@ -136,7 +136,7 @@ if __name__ == '__main__':
     ego_state = np.array([0.0, 0.0, 0.0]) # [x, y, theta]
     dt = 0.05
     total_steps = 2500
-    L = 0.6
+    L = 0.4
 
     planner = LocalSdfCdfPlanner()
     traj_x, traj_y, traj_residuals = [], [], []
@@ -206,7 +206,7 @@ if __name__ == '__main__':
         ego_p_local = jnp.array([L, 0.0])
         target_vector_local = target_local - ego_p_local
         dist_local = jnp.linalg.norm(target_vector_local)
-        u_nom_local = jnp.where(dist_local > 0.1, 1.0 * target_vector_local / (dist_local + 1e-6), jnp.zeros(2))
+        u_nom_local = jnp.where(dist_local > 0.1, 1.2 * target_vector_local / (dist_local + 1e-6), jnp.zeros(2))
 
         # 前向拦截 QP 求解
         u_opt_local, _ = planner.solve_agent_qp_local(ego_p_local, u_nom_local, current_pc_local, target_local)

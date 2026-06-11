@@ -8,6 +8,9 @@
 
 # modified environment variables
 export CMAKE_PREFIX_PATH="/home/guo/L-CDF/devel/.private/sensor_cdf:$CMAKE_PREFIX_PATH"
+export LD_LIBRARY_PATH="/home/guo/L-CDF/devel/.private/sensor_cdf/lib:$LD_LIBRARY_PATH"
+export PKG_CONFIG_PATH="/home/guo/L-CDF/devel/.private/sensor_cdf/lib/pkgconfig:$PKG_CONFIG_PATH"
 export PWD='/home/guo/L-CDF/build/sensor_cdf'
+export PYTHONPATH="/home/guo/L-CDF/devel/.private/sensor_cdf/lib/python3/dist-packages:$PYTHONPATH"
 export ROSLISP_PACKAGE_DIRECTORIES="/home/guo/L-CDF/devel/.private/sensor_cdf/share/common-lisp:$ROSLISP_PACKAGE_DIRECTORIES"
 export ROS_PACKAGE_PATH="/home/guo/L-CDF/src/sensor_cdf:$ROS_PACKAGE_PATH"

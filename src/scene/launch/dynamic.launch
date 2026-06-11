@@ -20,6 +20,7 @@
 
     <include file="$(find local_map)/launch/for_simulation.launch" />
 
+    <!-- 要是用来跑一个环境保存轨迹则启动，跑lidarutest不需要 -->
     <!-- <include file="$(find scene)/launch/movetest_node.launch" /> -->
 
     <node pkg="obs_param" type="obs_kf" output="screen" name="obs_kf" />
@@ -29,7 +30,11 @@
 
     <!-- <node name="run_cdf" pkg="sensor_cdf" type="run_cdf.py" output="screen"/> -->
     <!-- <node name="run_cdf_test" pkg="sensor_cdf" type="run_cdf_test.py" output="screen"/> -->
-    <node name="lidar_u_test" pkg="sensor_cdf" type="lidar_u_test.py" output="screen"/>
+    <!-- 用来跑一条轨迹用于画图，our算法 -->
+    <node name="traj_generate" pkg="sensor_cdf" type="traj_generate.py" output="screen"/>
+    <!-- 用来实时跑网络 -->
+    <!-- <node name="lidar_u_test" pkg="sensor_cdf" type="lidar_u_test.py" output="screen"/> -->
+
     <node name="update_state" pkg="sensor_cdf" type="update_state.py"/>
     <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py"/>
     <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py"/>
