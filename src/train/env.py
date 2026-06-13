@@ -28,8 +28,8 @@ def get_env_pool():
     env_pool.append({
         'target': np.array([14.5, 0.3]),
         'meta_obstacles': [
-            {'type': 'rect', 'center': np.array([6.0, 1.5]), 'a': 0.5, 'b': 1.0},
-            {'type': 'rect', 'center': np.array([6.0, -1.5]), 'a': 0.5, 'b': 1.0}, # 6米处一个宽1米的上下卡口
+            {'type': 'rect', 'center': np.array([6.0, 2]), 'a': 0.5, 'b': 1.0},
+            {'type': 'rect', 'center': np.array([6.0, -2]), 'a': 0.5, 'b': 1.0}, # 6米处一个宽1米的上下卡口
             {'type': 'circle', 'center': np.array([9.5, 0.0]), 'r': 0.4}
         ]
     })

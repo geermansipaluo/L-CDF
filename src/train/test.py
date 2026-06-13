@@ -47,7 +47,7 @@ def check_pt_data(file_path):
 
 
 # 文件路径
-file_path = "/home/guo/L-CDF/dataset_degenerate_test_10.pt"
+file_path = "/home/guo/L-CDF/dataset_trajectories.pt"
 
 # 执行脚本
 check_pt_data(file_path)

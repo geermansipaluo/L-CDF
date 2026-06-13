@@ -14,12 +14,12 @@ class PerfectLidarBridge:
         self.frame_id = "velodyne"
 
         # 完全对齐新专家系统的雷达截断定义
-        self.num_rays = rospy.get_param("~num_rays", 512)     
+        self.num_rays = rospy.get_param("~num_rays", 32)     
         self.max_range = rospy.get_param("~max_range", 3.0)   
         self.range_min = 0.1
 
         self.bin_edges = np.linspace(-np.pi, np.pi, self.num_rays + 1)
-        self.ray_angles = (self.bin_edges[:-1] + self.bin_edges[1:]) / 2.0 
+        self.ray_angles = np.linspace(-np.pi, np.pi, self.num_rays, endpoint=False)
 
         self.sub = rospy.Subscriber(self.input_topic, PointCloud2, self.pc_callback, queue_size=1)
         self.pub = rospy.Publisher(self.output_topic, PointCloud2, queue_size=10)
@@ -53,8 +53,9 @@ class PerfectLidarBridge:
             self.publish_empty_heartbeat()
             return
 
-        bin_indices = np.floor((angles_2d + np.pi) / (2 * np.pi) * self.num_rays).astype(int)
-        bin_indices = np.clip(bin_indices, 0, self.num_rays - 1)
+        bin_indices = np.round(
+            (angles_2d + np.pi) / (2.0 * np.pi) * self.num_rays
+        ).astype(np.int32) % self.num_rays
 
         reconstructed_ranges = np.full(self.num_rays, np.inf)
         np.minimum.at(reconstructed_ranges, bin_indices, distances_2d)
@@ -62,7 +63,7 @@ class PerfectLidarBridge:
         # 🔴【最关键改动】：严格同步训练集 min_t < 2.99 截断！
         # 以前这里是 reconstructed_ranges < np.inf。现在必须设为 < 2.99 
         # 这样射向虚空没有砸中任何东西、或者距离太远的射线在部署端会被彻底丢弃，绝不生成无效图节点
-        valid_ray_mask = reconstructed_ranges < 2.99
+        valid_ray_mask = reconstructed_ranges < self.max_range - 1e-3
         final_distances = reconstructed_ranges[valid_ray_mask]
         final_angles = self.ray_angles[valid_ray_mask]
 

@@ -33,15 +33,15 @@ class ParametricEllipseTracker:
         rospy.loginfo(f"显卡高速通道已拉起！当前 DensityNet 锁定的硬件计算核心为: [{self.device}]")
 
         self.cbf_config = {
-            'l_k': 0.2,          # 前瞻点杠杆距离 L
+            'l_k': 0.33,          # 前瞻点杠杆距离 L
             'r_ego': 0.31,        # 自车膨胀物理硬壳
-            'v_min': -0.0, 'v_max': 0.5,
+            'v_min': -1.2, 'v_max': 1.2,
             'w_min': -2, 'w_max': 2
         }
 
         self.current_pose = [0.0, 0.0, 0.0]  # [x, y, theta]
         self.goal_counter = 1 
-        self.target_pos = [15.0, 0.0]     
+        self.target_pos = [15.0, -0.2]     
         
         self.pointcloud_local = np.zeros((0, 2)) 
         self.last_executed_v = 0.0
@@ -133,6 +133,25 @@ class ParametricEllipseTracker:
         self.goal_timer = rospy.Timer(rospy.Duration(0.05), self.check_reach_goal) # 🟢 恢复并开启目标/碰撞监测定时器
 
         rospy.loginfo("🚀【DAgger 可微参数化自监督测试系统】部署就位！已挂载 10 回合全自动化在线指标考核大闸")
+
+    def load_model(self):
+        model_path = "/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt"
+        try:
+            model = UNet(
+                state_dim=4,
+                hidden_dim=256,
+                graph_k=5,
+                lambda_smooth=23,
+                ablation='full',
+            )
+            state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
+            model.load_state_dict(state_dict, strict=True)
+            model = model.to(self.device).eval()
+            rospy.loginfo("🎉【6维松弛参数化可微控制网络 UNet】装载成功！")
+            return model
+        except Exception as e:
+            rospy.logerr(f"参数化模型加载灾难性断层: {str(e)}")
+            raise RuntimeError(f"模型加载错误") from e
 
     def set_gazebo_model_pose(self, model_name, x, y, z=0.25):
         if self.set_model_state_srv is None:
@@ -278,19 +297,6 @@ class ParametricEllipseTracker:
             self.online_collected_buffer = [] 
         self.is_saving_lock = False
 
-    def load_model(self):
-        model_path = "/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/model_best_parametric_bc.pt"
-        try:
-            model = UNet(state_dim=4, hidden_dim=256)
-            state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
-            model.load_state_dict(state_dict, strict=True)
-            model = model.to(self.device).eval()
-            rospy.loginfo("🎉【6维松弛参数化可微控制网络 UNet】装载成功！")
-            return model
-        except Exception as e:
-            rospy.logerr(f"参数化模型加载灾难性断层: {str(e)}")
-            raise RuntimeError(f"模型加载错误") from e
-
     def cloud_callback(self, msg):
         if rospy.is_shutdown():
             return
@@ -335,31 +341,32 @@ class ParametricEllipseTracker:
         target_local_x = dx * np.cos(theta) + dy * np.sin(theta)
         target_local_y = -dx * np.sin(theta) + dy * np.cos(theta)
         
-        state_array = np.array([target_local_x, target_local_y, self.last_executed_v, self.last_executed_w], dtype=np.float32)
+        state_array = np.array([
+            target_local_x,
+            target_local_y,
+            self.last_executed_v,
+            self.last_executed_w,
+        ], dtype=np.float32)
         state_tensor = torch.tensor(state_array, dtype=torch.float32).unsqueeze(0).to(self.device) 
 
+        target_local_np = np.array([target_local_x, target_local_y], dtype=np.float32)
+        dist_local = np.linalg.norm(target_local_np)
+        NOMINAL_SPEED = 1.2
+
         # 计算标称运动学前瞻控制器动作
-        ego_p_x = x + l_k * np.cos(theta)
-        ego_p_y = y + l_k * np.sin(theta)
-        dx_p = float(self.target_pos[0]) - ego_p_x
-        dy_p = float(self.target_pos[1]) - ego_p_y
-        dist_p = np.hypot(dx_p, dy_p)
-        
-        if dist_to_goal_val > 0.44:
-            u_nom_local_np = np.array([1.0 * dx_p / (dist_p + 1e-6), 1.0 * dy_p / (dist_p + 1e-6)], dtype=np.float32)
+        if dist_to_goal_val > 0.44 and dist_local > 0.1:
+            u_nom_local_np = NOMINAL_SPEED * target_local_np / (dist_local + 1e-6)
         else:
-            u_nom_local_np = np.array([0.0, 0.0], dtype=np.float32)
+            u_nom_local_np = np.zeros(2, dtype=np.float32)
 
         is_empty = (self.pointcloud_local.shape[0] == 0) or (self.pointcloud_local[0,0] == 99 and self.pointcloud_local[0,1] == 99)
 
         # --- B. 双轨制控制解算 ---
         if is_empty:
-            v_global_x = u_nom_local_np[0]
-            v_global_y = u_nom_local_np[1]
-            v_pure_local_x =  v_global_x * np.cos(theta) + v_global_y * np.sin(theta)
-            v_pure_local_y = -v_global_x * np.sin(theta) + v_global_y * np.cos(theta)
-            v_final = float(v_pure_local_x)
-            w_final = float(v_pure_local_y / l_k)
+            u_safe_np = u_nom_local_np
+            v_final = u_safe_np[0]
+            w_final = u_safe_np[1]/l_k
+
         else:
             ego_p_local_jax = np.array([l_k, 0.0])
             fixed_size = 200
@@ -381,7 +388,7 @@ class ParametricEllipseTracker:
             points_batch = Batch.from_data_list([Data(pos=pos_tensor)]).to(self.device)
 
             with torch.no_grad():
-                u_safe_pred = self.model(state_tensor, points_batch, G_cdf_tensor, h_cdf_tensor)
+                u_safe_pred, _ = self.model(state_tensor, points_batch, G_cdf_tensor, h_cdf_tensor)
                 u_safe_np = u_safe_pred.detach().cpu().numpy().flatten()
                 if len(u_safe_np) < 2:
                     v_final = 0.0
@@ -389,8 +396,8 @@ class ParametricEllipseTracker:
                 v_final = u_safe_np[0]
                 w_final = u_safe_np[1]/l_k
 
-        self.last_executed_v = v_final
-        self.last_executed_w = w_final
+        self.last_executed_v = u_safe_np[0]
+        self.last_executed_w = u_safe_np[1]
         
         self.publish_twist(v_final, w_final)
 
@@ -410,7 +417,6 @@ class ParametricEllipseTracker:
     def check_reach_goal(self, event):
         """ 🟢 核心重构逻辑：判定到达靶点，执行多回合统计滚动与重置 """
         dist = np.linalg.norm(np.array(self.current_pose[:2]) - np.array(self.target_pos))
-        print(f"距离终点{dist}m")
         
         # 触发到达阈值
         if dist < 0.4:
