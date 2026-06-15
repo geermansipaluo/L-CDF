@@ -15,7 +15,7 @@ class PerfectLidarBridge:
 
         # 完全对齐新专家系统的雷达截断定义
         self.num_rays = rospy.get_param("~num_rays", 32)     
-        self.max_range = rospy.get_param("~max_range", 3.0)   
+        self.max_range = rospy.get_param("~max_range", 4.0)   
         self.range_min = 0.1
 
         self.bin_edges = np.linspace(-np.pi, np.pi, self.num_rays + 1)

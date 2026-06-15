@@ -19,7 +19,7 @@ LAUNCH_FILE="traj_eval_sweep.launch"
 
 # 你之前文字里写的是 save_models，但终端输出里是 saved_models。
 # 这里默认先用 save_models；如果不存在但 saved_models 存在，则自动切换。
-MODEL_ROOT="${MODEL_ROOT:-/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models}"
+MODEL_ROOT="${MODEL_ROOT:-/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss}"
 ALT_MODEL_ROOT="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models"
 
 if [[ ! -d "${MODEL_ROOT}" && -d "${ALT_MODEL_ROOT}" ]]; then
@@ -34,7 +34,7 @@ NUM_EVAL_EPISODES="${NUM_EVAL_EPISODES:-10}"
 TEST_TARGET_SEED="${TEST_TARGET_SEED:-2026}"
 MAX_EPISODE_TIME="${MAX_EPISODE_TIME:-80.0}"
 
-DEMO_LIST=(2 8 16 32 48)
+DEMO_LIST=(48 32 16 8 2)
 SEED_LIST=(0 1 2)
 
 # 重新跑完整实验时删除旧 CSV；想续跑就注释掉这一行。

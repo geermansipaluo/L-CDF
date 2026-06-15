@@ -87,9 +87,23 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
     包装成标准神经网络层的 6维升维参数化可微安全层
     它在前向调用 qpth 批量解算 6维凸优化，在反向自动完成 7x7 维的 KKT 齐次矩阵微分传导
     """
-    def __init__(self, lambda_smooth=1):
+    def __init__(
+        self,
+        lambda_smooth=1,
+        qp_limit=1.2,
+        use_qp_box_constraints=False,
+        qp_jitter=1e-4,
+        qp_normalize_constraints=True,
+        qp_constraint_scale_floor=1.0,
+    ):
         super().__init__()
         self.lambda_smooth = lambda_smooth
+        self.qp_limit = qp_limit
+        self.use_qp_box_constraints = use_qp_box_constraints
+        self.qp_jitter = qp_jitter
+        self.qp_normalize_constraints = qp_normalize_constraints
+        self.qp_constraint_scale_floor = qp_constraint_scale_floor
+        self._qp_warning_count = 0
         
     def forward(self, u_nom, G_cdf_6d, h_cdf):
         """
@@ -120,25 +134,63 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
         P_in[:, 1, 3] = val_uz; P_in[:, 3, 1] = val_uz
         P_in[:, 0, 4] = val_uz; P_in[:, 4, 0] = val_uz
         P_in[:, 1, 5] = val_uz; P_in[:, 5, 1] = val_uz
+
+        # qpth 的 PDIPM 对半正定/病态 Hessian 比 JaxProxQP 更敏感。
+        # 理论 H 已正定，但加极小 jitter 可以显著减少 KKT 分解临界失败。
+        if self.qp_jitter is not None and float(self.qp_jitter) > 0.0:
+            P_in = P_in + float(self.qp_jitter) * torch.eye(6, device=device, dtype=u_nom.dtype).unsqueeze(0)
         
         # 2.  完美重组 6维线性项向量 g (前两位挂载名义驱动，后四位辅助位置补零)
         g_in = torch.zeros(batch_size, 6, device=device)
         g_in[:, 0:2] = -2.0 * u_nom
         
-        # 3. 建立零维等式约束占位符
+        # 3. 约束预处理。
+        #    G/h 来自数据生成器的 SDF-CDF-QP。数值上，G 的量级可能因 rho/epsilon
+        #    在不同样本间差很多；行归一化不改变可行域，但能明显改善 qpth 条件数。
+        G_main = G_cdf_6d.to(device=device, dtype=u_nom.dtype)
+        h_main = h_cdf.to(device=device, dtype=u_nom.dtype)
+        if self.qp_normalize_constraints:
+            row_scale = torch.linalg.norm(G_main, dim=2, keepdim=True)
+            row_scale = torch.clamp(row_scale, min=float(self.qp_constraint_scale_floor))
+            G_main = G_main / row_scale
+            h_main = h_main / row_scale.squeeze(-1)
+
+        if self.use_qp_box_constraints:
+            # 可选：显式加入和 JAX/JaxProxQP 专家一致的 6D box 约束。
+            # 默认关闭，因为 qpth 在动作刚好贴着 +/-1.2 边界时容易出现无严格内点/残差警告。
+            eye6 = torch.eye(6, device=device, dtype=u_nom.dtype).unsqueeze(0).repeat(batch_size, 1, 1)
+            box_G = torch.cat([eye6, -eye6], dim=1)
+            box_h = torch.full(
+                (batch_size, 12),
+                float(self.qp_limit),
+                device=device,
+                dtype=u_nom.dtype,
+            )
+            G_all = torch.cat([G_main, box_G], dim=1)
+            h_all = torch.cat([h_main, box_h], dim=1)
+        else:
+            G_all = G_main
+            h_all = h_main
+
+        # 4. 建立零维等式约束占位符
         e = torch.Tensor().to(device)
         A = torch.Tensor().to(device)
         
         try:
             # 采用具有迭代细化扩展的 PDIPM_BATCHED 求解器，增强数学鲁棒性
-            sol_6d = QPFunction(verbose=False, solver=QPSolvers.PDIPM_BATCHED)(P_in, g_in, G_cdf_6d, h_cdf, e, A)
+            sol_6d = QPFunction(verbose=False, solver=QPSolvers.PDIPM_BATCHED)(P_in, g_in, G_all, h_all, e, A)
             if torch.isnan(sol_6d).any() or torch.isinf(sol_6d).any():
                 # 发现毒素，主动触发异常走防御兜底
                 raise ValueError("qpth_nan_detected")
         except Exception as e_qp:
-            # 如果遇到极端边界退化引发求解崩溃，通过标称直驱机制进行无损防御兜底
-            print(f"⚠️ [qpth 数值临界拦截] 捕获极端奇异发散，启用标称柔性降维防线.")
-            sol_6d = torch.zeros(batch_size, 6, device=device)
+            # 如果遇到极端边界退化引发求解崩溃，通过标称直驱机制兜底。
+            # 限制打印次数，避免日志被 qpth 临界样本刷屏。
+            if self._qp_warning_count < 20:
+                print(f"⚠️ [qpth 数值临界拦截] {type(e_qp).__name__}: 启用标称柔性降维防线.")
+            elif self._qp_warning_count == 20:
+                print("⚠️ [qpth 数值临界拦截] 后续同类警告将静默统计，不再刷屏。")
+            self._qp_warning_count += 1
+            sol_6d = torch.zeros(batch_size, 6, device=device, dtype=u_nom.dtype)
             sol_6d[:, 0:2] = u_nom
 
         u_safe = sol_6d[:, 0:2]
@@ -153,6 +205,11 @@ class UNet(nn.Module):
         hidden_dim=512,
         graph_k=10,
         lambda_smooth=25.0,
+        qp_limit=1.2,
+        use_qp_box_constraints=False,
+        qp_jitter=1e-4,
+        qp_normalize_constraints=True,
+        qp_constraint_scale_floor=1.0,
         ablation="full",
     ):
         super().__init__()
@@ -212,7 +269,12 @@ class UNet(nn.Module):
 
         if self.use_safety_layer:
             self.safety_layer = DifferentiableSdfCdfSafetyLayer6D(
-                lambda_smooth=lambda_smooth
+                lambda_smooth=lambda_smooth,
+                qp_limit=qp_limit,
+                use_qp_box_constraints=use_qp_box_constraints,
+                qp_jitter=qp_jitter,
+                qp_normalize_constraints=qp_normalize_constraints,
+                qp_constraint_scale_floor=qp_constraint_scale_floor
             )
         else:
             self.safety_layer = None

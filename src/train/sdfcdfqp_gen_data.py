@@ -578,15 +578,26 @@ if __name__ == '__main__':
     NOMINAL_SPEED = 1.2
 
     # X_frame 的后两维保存上一时刻 v, omega。
-    SAVE_PREV_VW_IN_X = True
+    SAVE_PREV_VW_IN_X = False
 
     # Y_frame 前两维动作标签默认保存“实际执行”的全局 CDF-QP teacher 控制。
     # 如果你后面想让动作标签也完全来自 SDF-CDF-QP，把这里改成 False。
     # 无论这个开关如何，Y_frame 后 7 维 G/h 都来自局部雷达点云 SDF-CDF-QP。
     SAVE_Y_ACTION_FROM_GLOBAL_TEACHER = True
 
-    # 每个环境生成多少条随机目标轨迹
+    # 关键帧采样策略：
+    # 1) 仍然只在 3m 雷达内存在命中点时才作为候选保存帧；
+    # 2) residual > 0.1 判定为关键帧，关键帧全部保存；
+    # 3) 非关键帧按 50% 概率保存，用于降低简单帧冗余。
+    KEYFRAME_RESIDUAL_THRESHOLD = 0.1
+    NON_KEYFRAME_KEEP_PROB = 1
+
+    # 每个环境生成多少条目标轨迹：保持 6 条不变。
+    # 第一阶段修复：每个环境强制包含 1 条终点 y=0 的直线目标轨迹，
+    # 其余 num_demos_per_env-1 条仍然按原来的 y ∈ [-2,2] 随机采样。
     num_demos_per_env = 6
+    force_one_y0_target_per_env = True
+    forced_y0_demo_id = 0
 
     # 随机目标范围
     target_x_min, target_x_max = 14.0, 16.0
@@ -607,13 +618,15 @@ if __name__ == '__main__':
     print("=" * 70)
     print("🚀 启动随机目标轨迹级专家数据生成：Global-Map CDF-QP Teacher")
     print(f"   环境数量: {len(env_pool)}")
-    print(f"   每个环境随机目标轨迹数: {num_demos_per_env}")
+    print(f"   每个环境目标轨迹数: {num_demos_per_env}")
+    print(f"   每个环境强制 y=0 轨迹: {force_one_y0_target_per_env}, demo_id={forced_y0_demo_id}")
     print(f"   目标x范围: [{target_x_min}, {target_x_max}]")
-    print(f"   目标y范围: [{target_y_min}, {target_y_max}]")
+    print(f"   随机目标y范围: [{target_y_min}, {target_y_max}]；强制轨迹 y=0.0")
     print(f"   控制专家: 全局参数化地图 CDF-QP + 固定 EPSILON")
     print(f"   训练约束标签: 3m 雷达点云 SDF-CDF-QP 的 G/h")
     print(f"   EPSILON={EPSILON}, lambda={LAMBDA_SMOOTH}, limit={QP_LIMIT}, L={L}, R_EGO_CDF={R_EGO_CDF}")
     print(f"   保存观测: 3m 固定圆 256线雷达命中点")
+    print(f"   关键帧策略: residual > {KEYFRAME_RESIDUAL_THRESHOLD} 全保存；非关键帧按 {NON_KEYFRAME_KEEP_PROB:.0%} 概率保存")
     print(f"   输出文件: {output_dataset_path}")
     print(f"   理论最大轨迹数: {len(env_pool) * num_demos_per_env}")
     print("=" * 70 + "\n")
@@ -630,15 +643,26 @@ if __name__ == '__main__':
             # ============================================================
             # 1. 为当前环境随机生成一个目标点
             # ============================================================
-            my_target = np.array([
-                rng.uniform(target_x_min, target_x_max),
-                rng.uniform(target_y_min, target_y_max),
-            ], dtype=np.float32)
+            if force_one_y0_target_per_env and demo_id == forced_y0_demo_id:
+                # 每个环境固定保留一条终点严格在 y=0 的轨迹，用来覆盖正前方目标/同伦破局样本。
+                my_target = np.array([
+                    rng.uniform(target_x_min, target_x_max),
+                    0.0,
+                ], dtype=np.float32)
+                target_sample_mode = 'forced_y0_per_env'
+            else:
+                my_target = np.array([
+                    rng.uniform(target_x_min, target_x_max),
+                    rng.uniform(target_y_min, target_y_max),
+                ], dtype=np.float32)
+                target_sample_mode = 'random_uniform_y'
+
             target_world_j = jnp.array(my_target, dtype=jnp.float32)
 
             print(
                 f"\n⏳ 正在生成轨迹: env={env_id}, demo={demo_id}, "
-                f"target=({my_target[0]:.3f}, {my_target[1]:.3f})"
+                f"target=({my_target[0]:.3f}, {my_target[1]:.3f}), "
+                f"mode={target_sample_mode}"
             )
 
             # 起点严格锁定在 [0, 0, 0]
@@ -649,6 +673,12 @@ if __name__ == '__main__':
             is_episode_success = False
             history_x = []
             history_y = []
+
+            # 当前轨迹的数据筛选统计
+            candidate_save_frames = 0
+            saved_key_frames = 0
+            saved_non_key_frames = 0
+            dropped_non_key_frames = 0
 
             # 上一帧执行控制，用于构造 X_frame。
             # 求解器原生控制量：u_ctrl=[v, L*omega]；
@@ -687,7 +717,7 @@ if __name__ == '__main__':
                     theta,
                     all_C,
                     all_d,
-                    num_rays=32,
+                    num_rays=64,
                     max_range=3.0,
                 )
 
@@ -741,9 +771,33 @@ if __name__ == '__main__':
                 )
 
                 # ========================================================
-                # E. 数据保存：3m 外不保存；3m 内全保存
+                # E. 数据保存：3m 外不保存；3m 内进入候选保存池
+                #    候选帧再按 residual 做关键帧筛选：
+                #    - control_residual > 0.1：关键帧，全部保存
+                #    - 其他非关键帧：按 50% 概率保存
                 # ========================================================
+                should_save_frame = False
+                is_key_frame = False
+                frame_keep_reason = 'no_lidar_hit'
+
                 if has_save_points:
+                    candidate_save_frames += 1
+                    is_key_frame = bool(control_residual > KEYFRAME_RESIDUAL_THRESHOLD)
+
+                    if is_key_frame:
+                        should_save_frame = True
+                        frame_keep_reason = 'keyframe_residual_gt_threshold'
+                        saved_key_frames += 1
+                    else:
+                        should_save_frame = bool(rng.random() < NON_KEYFRAME_KEEP_PROB)
+                        if should_save_frame:
+                            frame_keep_reason = 'non_keyframe_random_keep'
+                            saved_non_key_frames += 1
+                        else:
+                            frame_keep_reason = 'non_keyframe_random_drop'
+                            dropped_non_key_frames += 1
+
+                if should_save_frame:
                     if SAVE_PREV_VW_IN_X:
                         # X = [target_x_local, target_y_local, last_v, last_omega]
                         # v/omega 是车体运动学控制量，本身不分世界系/局部系。
@@ -807,8 +861,14 @@ if __name__ == '__main__':
                         'demo_id': demo_id,
                         'step': step,
                         'target': my_target.astype(np.float32),
+                        'target_sample_mode': target_sample_mode,
+                        'is_forced_y0_target': bool(target_sample_mode == 'forced_y0_per_env'),
                         'ego_state': np.array([x, y, theta], dtype=np.float32),
                         'control_residual': np.float32(control_residual),
+                        'is_key_frame': bool(is_key_frame),
+                        'keyframe_residual_threshold': np.float32(KEYFRAME_RESIDUAL_THRESHOLD),
+                        'non_keyframe_keep_prob': np.float32(NON_KEYFRAME_KEEP_PROB),
+                        'frame_keep_reason': frame_keep_reason,
                         'rho_global_cdf': np.float32(rho_debug),
                         'psi_global_cdf': np.float32(psi_debug),
                         'rho_sdf_label': np.float32(rho_sdf_debug),
@@ -847,6 +907,9 @@ if __name__ == '__main__':
                     print(
                         f"    🎯 [成功到达] env={env_id}, demo={demo_id}, "
                         f"step={step}, frames={len(episode_buffer)}, "
+                        f"key={saved_key_frames}, non_key={saved_non_key_frames}, "
+                        f"drop_non_key={dropped_non_key_frames}, "
+                        f"candidates={candidate_save_frames}, "
                         f"dist={dist_to_target:.3f}"
                     )
                     break
@@ -859,7 +922,15 @@ if __name__ == '__main__':
                     'env_id': env_id,
                     'demo_id': demo_id,
                     'target': my_target.astype(np.float32),
+                    'target_sample_mode': target_sample_mode,
+                    'is_forced_y0_target': bool(target_sample_mode == 'forced_y0_per_env'),
                     'num_frames': len(episode_buffer),
+                    'num_candidate_frames': int(candidate_save_frames),
+                    'num_key_frames': int(saved_key_frames),
+                    'num_non_key_frames': int(saved_non_key_frames),
+                    'num_dropped_non_key_frames': int(dropped_non_key_frames),
+                    'keyframe_residual_threshold': np.float32(KEYFRAME_RESIDUAL_THRESHOLD),
+                    'non_keyframe_keep_prob': np.float32(NON_KEYFRAME_KEEP_PROB),
                     'frames': episode_buffer,
                     'history_x': np.array(history_x, dtype=np.float32),
                     'history_y': np.array(history_y, dtype=np.float32),
@@ -871,6 +942,8 @@ if __name__ == '__main__':
                     f"    📥 [轨迹保存] env={env_id}, demo={demo_id}, "
                     f"target=({my_target[0]:.3f}, {my_target[1]:.3f}), "
                     f"frames={len(episode_buffer)}, "
+                    f"key={saved_key_frames}, non_key={saved_non_key_frames}, "
+                    f"drop_non_key={dropped_non_key_frames}, "
                     f"当前总轨迹数={len(global_trajectory_buffer)}"
                 )
 

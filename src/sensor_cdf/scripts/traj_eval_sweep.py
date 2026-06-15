@@ -44,7 +44,7 @@ class ParametricEllipseTracker:
         # ============================================================
         self.model_path = rospy.get_param(
             "~model_path",
-            "/home/guo/L-CDF/src/sensor_cdf/scripts/save_models/DensityNet-demo2-dseed0-seed0/model_best_parametric_bc.pt",
+            "/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt",
         )
         self.output_csv = rospy.get_param(
             "~output_csv",
@@ -69,42 +69,57 @@ class ParametricEllipseTracker:
         self.max_episode_time = float(rospy.get_param("~max_episode_time", 80.0))
         self.terminate_on_collision = bool(rospy.get_param("~terminate_on_collision", False))
 
-        # 按你的要求：hidden_dim / graph_k / lambda_smooth 不在这里暴露。
-        # 这里保持你本地 model.py 和训练设置一致即可。
+        # 严格对齐当前最终版 traj_generate.py 的模型结构。
         self.model_state_dim = 4
-        self.model_hidden_dim = int(rospy.get_param("~hidden_dim", 256))
+        self.model_hidden_dim = 256
+        self.model_graph_k = 5
+        self.model_lambda_smooth = 25
+        self.model_ablation = "full"
 
         os.makedirs(self.trajectory_save_dir, exist_ok=True)
 
+        # 严格对齐当前最终版 traj_generate.py
         self.cbf_config = {
-            "l_k": 0.2,
+            "l_k": 0.33,
             "r_ego": 0.31,
-            "v_min": -0.0,
-            "v_max": 0.5,
+            "v_min": -1.2,
+            "v_max": 1.2,
             "w_min": -2.0,
             "w_max": 2.0,
         }
 
         self.current_pose = [0.0, 0.0, 0.0]
         self.pointcloud_local = np.zeros((0, 2), dtype=np.float32)
+        # 注意：为了和训练数据、当前 traj_generate.py 对齐，
+        # state 后两维保存的是 u=[v, L*omega]，不是 [v, omega]。
         self.last_executed_v = 0.0
         self.last_executed_w = 0.0
 
         # ============================================================
         # 2. 固定测试目标：所有模型必须用同一个 test_target_seed
         # ============================================================
-        rng = np.random.default_rng(self.test_target_seed)
-        self.test_targets = np.stack(
-            [
-                rng.uniform(self.target_x_min, self.target_x_max, size=self.total_eval_episodes),
-                rng.uniform(self.target_y_min, self.target_y_max, size=self.total_eval_episodes),
-            ],
-            axis=1,
+        # rng = np.random.default_rng(self.test_target_seed)
+        # self.test_targets = np.stack(
+        #     [
+        #         rng.uniform(self.target_x_min, self.target_x_max, size=self.total_eval_episodes),
+        #         rng.uniform(self.target_y_min, self.target_y_max, size=self.total_eval_episodes),
+        #     ],
+        #     axis=1,
+        # ).astype(np.float32)
+        fixed_target = np.array([15.0, 0], dtype=np.float32)
+
+        self.test_targets = np.tile(
+            fixed_target[None, :],
+            (self.total_eval_episodes, 1)
         ).astype(np.float32)
 
         self.episode_index = 0
         self.target_pos = self.test_targets[self.episode_index].tolist()
-        self.current_episode_start_time = time.time()
+        self.hold_before_episode = float(rospy.get_param("~hold_before_episode", 2.0))
+
+        now = time.time()
+        self.episode_hold_until = now + self.hold_before_episode
+        self.current_episode_start_time = self.episode_hold_until
         self.episode_finish_lock = False
 
         # ============================================================
@@ -113,8 +128,8 @@ class ParametricEllipseTracker:
         self.obstacles = np.array(
             [
                 [5.0, 0.05],
-                [6.5, -0.5],
-                [8.0, -2.5],
+                # [6.5, -0.5],
+                [8.0, 2.0],
                 [10.0, -0.5],
             ],
             dtype=np.float32,
@@ -207,7 +222,13 @@ class ParametricEllipseTracker:
             raise FileNotFoundError(f"模型文件不存在: {model_path}")
 
         try:
-            model = UNet(state_dim=self.model_state_dim, hidden_dim=self.model_hidden_dim)
+            model = UNet(
+                state_dim=self.model_state_dim,
+                hidden_dim=self.model_hidden_dim,
+                graph_k=self.model_graph_k,
+                lambda_smooth=self.model_lambda_smooth,
+                ablation=self.model_ablation,
+            )
             state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
             model.load_state_dict(state_dict, strict=True)
             model = model.to(self.device).eval()
@@ -263,8 +284,8 @@ class ParametricEllipseTracker:
     def apply_fixed_obstacles_to_gazebo(self):
         fixed_obstacles = [
             [5.0, 0.05],
-            [6.5, -0.5],
-            [8.0, -2.5],
+            # [6.5, -0.5],
+            [8.0, 2.0],
             [10.0, -0.5],
         ]
         for i, p in enumerate(fixed_obstacles):
@@ -341,6 +362,9 @@ class ParametricEllipseTracker:
             return
 
         self.publish_target_marker()
+        if time.time() < self.episode_hold_until:
+            self.publish_twist(0.0, 0.0)
+            return
         x, y, theta = self.current_pose
         l_k = self.cbf_config["l_k"]
 
@@ -380,19 +404,14 @@ class ParametricEllipseTracker:
         )
         state_tensor = torch.tensor(state_array, dtype=torch.float32).unsqueeze(0).to(self.device)
 
-        ego_p_x = x + l_k * np.cos(theta)
-        ego_p_y = y + l_k * np.sin(theta)
-        dx_p = float(self.target_pos[0]) - ego_p_x
-        dy_p = float(self.target_pos[1]) - ego_p_y
-        dist_p = np.hypot(dx_p, dy_p)
+        target_local_np = np.array([target_local_x, target_local_y], dtype=np.float32)
+        dist_local = np.linalg.norm(target_local_np)
+        NOMINAL_SPEED = 1.5
 
-        if dist_to_goal_val > self.goal_radius:
-            u_nom_local_np = np.array(
-                [1.0 * dx_p / (dist_p + 1e-6), 1.0 * dy_p / (dist_p + 1e-6)],
-                dtype=np.float32,
-            )
+        if dist_to_goal_val > self.goal_radius and dist_local > 0.1:
+            u_nom_local_np = NOMINAL_SPEED * target_local_np / (dist_local + 1e-6)
         else:
-            u_nom_local_np = np.array([0.0, 0.0], dtype=np.float32)
+            u_nom_local_np = np.zeros(2, dtype=np.float32)
 
         is_empty = (
             self.pointcloud_local.shape[0] == 0
@@ -400,13 +419,9 @@ class ParametricEllipseTracker:
         )
 
         if is_empty:
-            # 空点云时保持你原来的测试逻辑：走 nominal
-            v_global_x = u_nom_local_np[0]
-            v_global_y = u_nom_local_np[1]
-            v_pure_local_x = v_global_x * np.cos(theta) + v_global_y * np.sin(theta)
-            v_pure_local_y = -v_global_x * np.sin(theta) + v_global_y * np.cos(theta)
-            v_final = float(v_pure_local_x)
-            w_final = float(v_pure_local_y / l_k)
+            u_safe_np = u_nom_local_np
+            v_final = float(u_safe_np[0])
+            w_final = float(u_safe_np[1] / l_k)
         else:
             ego_p_local_jax = np.array([l_k, 0.0], dtype=np.float32)
             fixed_size = 200
@@ -446,8 +461,11 @@ class ParametricEllipseTracker:
                 v_final = float(u_safe_np[0])
                 w_final = float(u_safe_np[1] / l_k)
 
+        # 和当前最终版 traj_generate.py 保持一致：
+        # 网络输出/训练标签是 u=[v, L*omega]，cmd_vel 发布前再除以 L 得到 omega。
+        # 因此下一帧 state 里保存 last_executed_w = L*omega = u_y。
         self.last_executed_v = v_final
-        self.last_executed_w = w_final
+        self.last_executed_w = w_final * l_k
         self.publish_twist(v_final, w_final)
 
     def check_reach_goal(self, event):
@@ -516,8 +534,15 @@ class ParametricEllipseTracker:
         self.current_run_trajectory = []
         self.collision_happened_in_current_run = False
         self.last_collision_time = 0.0
-        self.current_episode_start_time = time.time()
+        now = time.time()
+        self.episode_hold_until = now + self.hold_before_episode
+
+        # timeout 从静止等待结束后再开始计时
+        self.current_episode_start_time = self.episode_hold_until
+
+        # 解锁后 control_loop 会进入 hold 分支，持续发布 0 速度
         self.episode_finish_lock = False
+        self.publish_twist(0.0, 0.0)
 
         rospy.logerr(
             f"新一轮开始: {self.episode_index + 1}/{self.total_eval_episodes}, target={self.target_pos}"

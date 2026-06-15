@@ -74,3 +74,10 @@ num_demos=2,8,16,32,48
 seed_demos=0,1,2
 seed=0,1,2
 demo2_dseed0_seed0_20260611_112126
+
+
+
+UnknownGym_DensityNet_DualHead_PINN_ablation-full_demo48_dseed1_seed1_20260615_105914
+从这里 开始是老loss的实验，一直到
+UnknownGym_DensityNet_DualHead_PINN_ablation-full_demo2_dseed2_seed2_20260615_114106
+结束

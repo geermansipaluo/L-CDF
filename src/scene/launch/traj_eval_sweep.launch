@@ -1,23 +1,16 @@
 <?xml version="1.0"?>
 
 <launch>
-    <!-- ============================================================
-         DensityNet 批量评测专用 launch
-         用法示例：
-         roslaunch scene dynamic_eval.launch \
-             model_path:=/home/guo/L-CDF/src/sensor_cdf/scripts/save_models/DensityNet-demo2-dseed0-seed0/model_best_parametric_bc.pt \
-             num_demos:=2 demo_seed:=0 train_seed:=0 \
-             output_csv:=/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv
-         ============================================================ -->
+    <!-- DensityNet 批量评测专用 launch：已对齐当前最终版 traj_generate.py -->
 
-    <!-- 评测参数 -->
-    <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/save_models/DensityNet-demo2-dseed0-seed0/model_best_parametric_bc.pt" />
+    <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt" />
     <arg name="output_csv" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv" />
     <arg name="trajectory_save_dir" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories" />
 
-    <arg name="num_demos" default="-1" />
-    <arg name="demo_seed" default="-1" />
-    <arg name="train_seed" default="-1" />
+    <arg name="num_demos" default="48" />
+    <arg name="demo_seed" default="0" />
+    <arg name="train_seed" default="0" />
+    <arg name="hold_before_episode" default="2.0" />
 
     <arg name="num_eval_episodes" default="10" />
     <arg name="test_target_seed" default="2026" />
@@ -25,13 +18,12 @@
 
     <arg name="target_x_min" default="14.0" />
     <arg name="target_x_max" default="16.0" />
-    <arg name="target_y_min" default="-2.0" />
-    <arg name="target_y_max" default="2.0" />
+    <arg name="target_y_min" default="-1.0" />
+    <arg name="target_y_max" default="1.0" />
     <arg name="goal_radius" default="0.4" />
     <arg name="terminate_on_collision" default="false" />
 
-    <!-- 批量跑时建议 false；单独看轨迹时可以 roslaunch ... use_rviz:=true -->
-    <arg name="use_rviz" default="false" />
+    <arg name="use_rviz" default="true" />
 
     <include file="$(find scene)/launch/start.launch">
         <arg name="world" value="$(find scene)/worlds/world.world" />
@@ -54,7 +46,6 @@
 
     <node pkg="obs_param" type="obs_kf" output="screen" name="obs_kf" />
 
-    <!-- 批量评测核心节点：required=true 保证评测完成后 roslaunch 自动关闭本轮仿真 -->
     <node name="traj_eval_sweep" pkg="sensor_cdf" type="traj_eval_sweep.py" output="screen" required="true">
         <param name="model_path" value="$(arg model_path)" />
         <param name="output_csv" value="$(arg output_csv)" />
@@ -63,6 +54,7 @@
         <param name="num_demos" type="int" value="$(arg num_demos)" />
         <param name="demo_seed" type="int" value="$(arg demo_seed)" />
         <param name="train_seed" type="int" value="$(arg train_seed)" />
+        <param name="hold_before_episode" type="double" value="$(arg hold_before_episode)" />
 
         <param name="num_eval_episodes" type="int" value="$(arg num_eval_episodes)" />
         <param name="test_target_seed" type="int" value="$(arg test_target_seed)" />
@@ -80,9 +72,10 @@
     <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py" />
     <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py" />
 
+    <!-- 对齐数据生成和 HDL-32E samples=32：桥接器输出固定 32 根 2D 射线 -->
     <node name="perfect_lidar_bridge" pkg="sensor_cdf" type="perfect_lidar_bridge.py" output="screen">
-        <param name="num_rays" value="256" />
-        <param name="max_range" value="3.0" />
+        <param name="num_rays" type="int" value="64" />
+        <param name="max_range" type="double" value="3" />
     </node>
 
     <node if="$(arg use_rviz)" name="rviz" pkg="rviz" type="rviz"

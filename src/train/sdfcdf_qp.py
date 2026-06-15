@@ -689,7 +689,7 @@ if __name__ == '__main__':
     for i in range(len(traj_x) - 1):
         x_seg = [traj_x[i], traj_x[i + 1]]
         y_seg = [traj_y[i], traj_y[i + 1]]
-        if i < len(residuals) and residuals[i] > 0.08:
+        if i < len(residuals) and residuals[i] > 0.1:
             ax.plot(x_seg, y_seg, color='crimson', linewidth=3.5, zorder=3)
         else:
             ax.plot(x_seg, y_seg, color='royalblue', linewidth=2.0, zorder=2)

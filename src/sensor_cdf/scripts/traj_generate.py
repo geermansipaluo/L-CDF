@@ -41,7 +41,7 @@ class ParametricEllipseTracker:
 
         self.current_pose = [0.0, 0.0, 0.0]  # [x, y, theta]
         self.goal_counter = 1 
-        self.target_pos = [15.0, -0.2]     
+        self.target_pos = [15.0, 0]     
         
         self.pointcloud_local = np.zeros((0, 2)) 
         self.last_executed_v = 0.0
@@ -53,7 +53,7 @@ class ParametricEllipseTracker:
         # 静态障碍物配置：圆形半径 0.5m，小车自身物理半径 r_ego=0.31m，安全临界距离阈值 = 0.5 + 0.31 = 0.81m
         self.obstacles = np.array([
             [5.0, 0.05],
-            [6.5, -0.5],
+            # [6.5, -0.5],
             [8.0, -2.5],
             [10.0, -0.5]
         ])
@@ -141,7 +141,7 @@ class ParametricEllipseTracker:
                 state_dim=4,
                 hidden_dim=256,
                 graph_k=5,
-                lambda_smooth=23,
+                lambda_smooth=25,
                 ablation='full',
             )
             state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
@@ -193,7 +193,7 @@ class ParametricEllipseTracker:
     def apply_fixed_obstacles_to_gazebo(self):
         fixed_obstacles = [
             [5.0, 0.05],
-            [6.5, -0.5],
+            # [6.5, -0.5],
             [8.0, -2.5],
             [10.0, -0.5],
         ]
@@ -351,7 +351,7 @@ class ParametricEllipseTracker:
 
         target_local_np = np.array([target_local_x, target_local_y], dtype=np.float32)
         dist_local = np.linalg.norm(target_local_np)
-        NOMINAL_SPEED = 1.2
+        NOMINAL_SPEED = 1.0
 
         # 计算标称运动学前瞻控制器动作
         if dist_to_goal_val > 0.44 and dist_local > 0.1:
