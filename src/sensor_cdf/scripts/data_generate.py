@@ -115,7 +115,7 @@ class LocalSdfCdfPlanner:
         C_mat = jnp.zeros((1, dim_total)).at[0, 0:2].set(coeff_u).at[0, 2:4].set(coeff_z1).at[0, 4:6].set(coeff_z2)
         b_vec = jnp.zeros(1).at[0].set(drift_term - rho_curr)
         
-        limit = 1.5
+        limit = 1.2
         l_box = jnp.array([-limit] * 6); u_box = jnp.array([limit] * 6)
         
         qp = JaxProxQP.QPModel.create(H, g_vec, C_mat, b_vec, l_box=l_box, u_box=u_box)

@@ -93,7 +93,7 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
         qp_limit=1.2,
         use_qp_box_constraints=False,
         qp_jitter=1e-4,
-        qp_normalize_constraints=True,
+        qp_normalize_constraints=False,
         qp_constraint_scale_floor=1.0,
     ):
         super().__init__()
