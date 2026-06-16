@@ -69,6 +69,7 @@ class ParametricEllipseTracker:
         self.max_episode_time = float(rospy.get_param("~max_episode_time", 80.0))
         self.terminate_on_collision = bool(rospy.get_param("~terminate_on_collision", False))
 
+
         # 严格对齐当前最终版 traj_generate.py 的模型结构。
         self.model_state_dim = 4
         self.model_hidden_dim = 256
@@ -106,7 +107,7 @@ class ParametricEllipseTracker:
         #     ],
         #     axis=1,
         # ).astype(np.float32)
-        fixed_target = np.array([15.0, 0], dtype=np.float32)
+        fixed_target = np.array([15.0, -1], dtype=np.float32)
 
         self.test_targets = np.tile(
             fixed_target[None, :],
@@ -129,7 +130,7 @@ class ParametricEllipseTracker:
             [
                 [5.0, 0.05],
                 # [6.5, -0.5],
-                [8.0, 2.0],
+                [8.0, -2.5],
                 [10.0, -0.5],
             ],
             dtype=np.float32,
@@ -238,12 +239,50 @@ class ParametricEllipseTracker:
             rospy.logerr(f"模型加载失败: {str(e)}")
             raise RuntimeError("模型加载错误") from e
 
-    def get_model_action(self, state_tensor, points_batch, G_cdf_tensor, h_cdf_tensor):
-        """兼容两种模型输出：Tensor 或 (u_safe, u_nom)。
+    def make_points_batch(self, local_pts):
+        """构造 PyG Batch。
 
-        你现在测试只需要最终控制输出；如果 model.forward 已经只返回一个 Tensor，
-        这里会直接使用它。如果仍返回 tuple/list，这里自动取第一个。
+        评测雷达命中点有时很少；当点数小于 graph_k+1 时，重复最后一个点，
+        避免 DynamicEdgeConv / knn_graph 在极少点云下退化。
         """
+        pc_model = np.asarray(local_pts, dtype=np.float32)
+        if pc_model.ndim != 2 or pc_model.shape[0] == 0:
+            pc_model = np.zeros((2, 2), dtype=np.float32)
+
+        min_points = max(2, int(self.model_graph_k) + 1)
+        if pc_model.shape[0] < min_points:
+            repeat_count = min_points - pc_model.shape[0]
+            pad = np.repeat(pc_model[-1:, :], repeats=repeat_count, axis=0)
+            pc_model = np.vstack([pc_model, pad]).astype(np.float32)
+
+        pos_tensor = torch.tensor(pc_model, dtype=torch.float32)
+        return Batch.from_data_list([Data(pos=pos_tensor)]).to(self.device)
+
+    def predict_model_unom(self, state_tensor, points_batch):
+        """只取网络 head 的 nominal 输出，不经过 qpth safety layer。
+
+        新版 loss 下，head 被监督为 u_nom，因此测试端应先取 u_nom_pred，
+        再基于 u_nom_pred 重新构造当前帧 G/h。
+        """
+        with torch.no_grad():
+            if hasattr(self.model, "predict_unom"):
+                return self.model.predict_unom(state_tensor, points_batch)
+
+            # 兼容当前 UNet 结构：直接复用 forward 里的编码路径，但绕开 safety_layer。
+            if getattr(self.model, "use_dual_branch", True):
+                geo_feat = self.model.geo_encoder(points_batch)
+                state_feat = self.model.state_encoder(state_tensor)
+                fused = self.model.fusion(torch.cat([geo_feat, state_feat], dim=1))
+            else:
+                state_per_point = state_tensor[points_batch.batch]
+                node_features = torch.cat([points_batch.pos, state_per_point], dim=1)
+                geo_feat = self.model.geo_encoder(points_batch, node_features=node_features)
+                fused = self.model.fusion(geo_feat)
+
+            return self.model.head(fused) * 1.2
+
+    def get_model_action(self, state_tensor, points_batch, G_cdf_tensor, h_cdf_tensor):
+        """qpth 对照模式：直接走模型 forward，返回最终动作。"""
         with torch.no_grad():
             out = self.model(state_tensor, points_batch, G_cdf_tensor, h_cdf_tensor)
             if isinstance(out, (tuple, list)):
@@ -285,7 +324,7 @@ class ParametricEllipseTracker:
         fixed_obstacles = [
             [5.0, 0.05],
             # [6.5, -0.5],
-            [8.0, 2.0],
+            [8.0, -2.5],
             [10.0, -0.5],
         ]
         for i, p in enumerate(fixed_obstacles):
@@ -406,7 +445,7 @@ class ParametricEllipseTracker:
 
         target_local_np = np.array([target_local_x, target_local_y], dtype=np.float32)
         dist_local = np.linalg.norm(target_local_np)
-        NOMINAL_SPEED = 1.5
+        NOMINAL_SPEED = 1.2
 
         if dist_to_goal_val > self.goal_radius and dist_local > 0.1:
             u_nom_local_np = NOMINAL_SPEED * target_local_np / (dist_local + 1e-6)
@@ -415,10 +454,15 @@ class ParametricEllipseTracker:
 
         is_empty = (
             self.pointcloud_local.shape[0] == 0
-            or (self.pointcloud_local.shape[0] > 0 and self.pointcloud_local[0, 0] == 99 and self.pointcloud_local[0, 1] == 99)
+            or (
+                self.pointcloud_local.shape[0] > 0
+                and self.pointcloud_local[0, 0] == 99
+                and self.pointcloud_local[0, 1] == 99
+            )
         )
 
         if is_empty:
+            # 无障碍观测时保持你当前设置：用解析 nominal 直驱。
             u_safe_np = u_nom_local_np
             v_final = float(u_safe_np[0])
             w_final = float(u_safe_np[1] / l_k)
@@ -434,9 +478,19 @@ class ParametricEllipseTracker:
             else:
                 local_pts_for_qp = local_pts
 
+            points_batch = self.make_points_batch(local_pts)
+
+            # 新版 QP 对齐测试流程，但最终控制必须来自模型内部可微安全层：
+            # 1) 网络先预测 u_nom；
+            # 2) 用 u_nom_pred 重新计算当前帧 SDF-CDF-QP 的 G/h；
+            # 3) 再把 G/h 喂给模型 forward，由可微安全层输出 u_safe。
+            # 注意：这里不使用 JAX 的 sol_6d_raw 作为最终动作，JAX 只用于生成 G/h。
+            u_nom_pred = self.predict_model_unom(state_tensor, points_batch)
+            u_nom_for_qp = u_nom_pred.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+
             _, G_extracted, h_extracted = self.local_expert.solve_agent_qp_local(
                 ego_p_local_jax,
-                u_nom_local_np,
+                u_nom_for_qp,
                 local_pts_for_qp,
                 np.array([target_local_x, target_local_y], dtype=np.float32),
             )
@@ -444,22 +498,17 @@ class ParametricEllipseTracker:
             G_cdf_tensor = torch.tensor(G_extracted, dtype=torch.float32).unsqueeze(0).to(self.device)
             h_cdf_tensor = torch.tensor(h_extracted, dtype=torch.float32).unsqueeze(0).to(self.device)
 
-            # 模型点云输入。点数太少时简单重复，避免 kNN 图构建极端退化。
-            pc_model = local_pts
-            if pc_model.shape[0] == 1:
-                pc_model = np.repeat(pc_model, repeats=2, axis=0)
-            pos_tensor = torch.tensor(pc_model, dtype=torch.float32)
-            points_batch = Batch.from_data_list([Data(pos=pos_tensor)]).to(self.device)
-
             u_safe_pred = self.get_model_action(state_tensor, points_batch, G_cdf_tensor, h_cdf_tensor)
-            u_safe_np = u_safe_pred.detach().cpu().numpy().flatten()
+            u_safe_np = u_safe_pred.detach().cpu().numpy().flatten().astype(np.float32)
 
-            if len(u_safe_np) < 2:
+            if len(u_safe_np) < 2 or (not np.all(np.isfinite(u_safe_np[:2]))):
                 v_final = 0.0
                 w_final = 0.0
+                u_safe_np = np.zeros(2, dtype=np.float32)
             else:
-                v_final = float(u_safe_np[0])
-                w_final = float(u_safe_np[1] / l_k)
+                v_final = float(np.clip(u_safe_np[0], self.cbf_config["v_min"], self.cbf_config["v_max"]))
+                w_final = float(np.clip(u_safe_np[1] / l_k, self.cbf_config["w_min"], self.cbf_config["w_max"]))
+                u_safe_np = np.array([v_final, w_final * l_k], dtype=np.float32)
 
         # 和当前最终版 traj_generate.py 保持一致：
         # 网络输出/训练标签是 u=[v, L*omega]，cmd_vel 发布前再除以 L 得到 omega。

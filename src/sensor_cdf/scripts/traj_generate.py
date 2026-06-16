@@ -41,7 +41,7 @@ class ParametricEllipseTracker:
 
         self.current_pose = [0.0, 0.0, 0.0]  # [x, y, theta]
         self.goal_counter = 1 
-        self.target_pos = [15.0, 0]     
+        self.target_pos = [15.0, -0.5]     
         
         self.pointcloud_local = np.zeros((0, 2)) 
         self.last_executed_v = 0.0
@@ -135,7 +135,7 @@ class ParametricEllipseTracker:
         rospy.loginfo("🚀【DAgger 可微参数化自监督测试系统】部署就位！已挂载 10 回合全自动化在线指标考核大闸")
 
     def load_model(self):
-        model_path = "/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt"
+        model_path = "/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed1-seed1/model_best_parametric_bc.pt"
         try:
             model = UNet(
                 state_dim=4,
