@@ -46,14 +46,14 @@ class ParametricEllipseTracker:
         # - runtime_qp_mode='qpth'：用于验证 PyTorch safety_layer 本身
         # ================================================================
         self.nominal_speed = float(rospy.get_param('~nominal_speed', 1.2))
-        self.runtime_qp_mode = str(rospy.get_param('~runtime_qp_mode', 'jax')).lower()
-        self.model_graph_k = int(rospy.get_param('~graph_k', 10))  # 必须和训练时 --graph_k 一致
+        self.runtime_qp_mode = str(rospy.get_param('~runtime_qp_mode', 'qpth')).lower()
+        self.model_graph_k = int(rospy.get_param('~graph_k', 5))  # 必须和训练时 --graph_k 一致
         self.model_hidden_dim = int(rospy.get_param('~hidden_dim', 256))
         self.model_lambda_smooth = float(rospy.get_param('~lambda_smooth', 25.0))
         self.model_qp_limit = float(rospy.get_param('~qp_limit', 1.2))
-        self.use_qp_box_constraints = bool(rospy.get_param('~use_qp_box_constraints', False))
+        self.use_qp_box_constraints = bool(rospy.get_param('~use_qp_box_constraints', True))
         self.qp_jitter = float(rospy.get_param('~qp_jitter', 1e-4))
-        self.qp_normalize_constraints = bool(rospy.get_param('~qp_normalize_constraints', True))
+        self.qp_normalize_constraints = bool(rospy.get_param('~qp_normalize_constraints', False))
         self.qp_constraint_scale_floor = float(rospy.get_param('~qp_constraint_scale_floor', 1.0))
 
         self.current_pose = [0.0, 0.0, 0.0]  # [x, y, theta]
@@ -476,6 +476,17 @@ class ParametricEllipseTracker:
                     else:
                         u_safe_tensor = torch.tensor(u_nom_np, dtype=torch.float32).unsqueeze(0).to(self.device)
                     u_safe_np = u_safe_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+
+            rospy.logwarn(
+                f"[QP DEBUG] "
+                f"u_nom={u_nom_np}, "
+                f"u_jax={np.array(sol_6d_raw[:2], dtype=np.float32)}, "
+                f"u_qpth={u_safe_np}, "
+                f"|jax-nom|={np.linalg.norm(np.array(sol_6d_raw[:2], dtype=np.float32)-u_nom_np):.4f}, "
+                f"|qpth-nom|={np.linalg.norm(u_safe_np-u_nom_np):.4f}, "
+                f"|qpth-jax|={np.linalg.norm(u_safe_np-np.array(sol_6d_raw[:2], dtype=np.float32)):.4f}, "
+                f"qpth_warn_count={getattr(self.model.safety_layer, '_qp_warning_count', -1)}"
+            )
 
         # C. 最终命令限幅与发布。last_executed_* 保存 u_ctrl=[v,L*omega]，和训练 X 后两维一致。
         v_final, w_final, u_ctrl_clipped = self.clip_u_ctrl_to_cmd(u_safe_np)
