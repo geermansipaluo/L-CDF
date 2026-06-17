@@ -265,7 +265,7 @@ def get_local_sdf_rho_and_psi_for_label(pos_p_local, target_local, local_pc_vali
     psi_curr = smooth_bump(c_val, b_val)
 
     V_x = jnp.sum((pos_p_local - target_local) ** 2)
-    alpha = 0.5
+    alpha = 0.25
     rho = psi_curr / (V_x ** alpha + 1e-6)
     return rho, psi_curr
 

@@ -12,6 +12,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from visualization_msgs.msg import Marker
 from std_msgs.msg import Header
 import time
+import inspect
 from gazebo_msgs.msg import ModelState
 from gazebo_msgs.srv import SetModelState
 
@@ -61,9 +62,9 @@ class ParametricEllipseTracker:
         # - runtime_qp_mode='jax'：推荐，使用 JAX/ProxQP 做最终安全投影，避免 qpth 推理期数值警告
         # - runtime_qp_mode='qpth'：用于验证 PyTorch safety_layer 本身
         # ================================================================
-        self.nominal_speed = float(rospy.get_param('~nominal_speed', 1.0))
-        self.runtime_qp_mode = str(rospy.get_param('~runtime_qp_mode', 'qpth')).lower()
-        self.model_graph_k = int(rospy.get_param('~graph_k', 6))  # 必须和训练时 --graph_k 一致
+        self.nominal_speed = float(rospy.get_param('~nominal_speed', 1.2))
+        self.runtime_qp_mode = str(rospy.get_param('~runtime_qp_mode', 'qpth')).lower()  # qpth=learned PyTorch CDF-QP, jax=JAX expert, nominal=no safety
+        self.model_graph_k = int(rospy.get_param('~graph_k', 5))  # 必须和训练时 --graph_k 一致
         self.model_hidden_dim = int(rospy.get_param('~hidden_dim', 256))
         self.model_lambda_smooth = float(rospy.get_param('~lambda_smooth', 25.0))
         self.model_qp_limit = float(rospy.get_param('~qp_limit', 1.2))
@@ -86,6 +87,30 @@ class ParametricEllipseTracker:
         self.lambda_smooth_max = float(rospy.get_param('~lambda_smooth_max', 50.0))
         self.lambda_reg_weight = float(rospy.get_param('~lambda_reg_weight', 1e-4))
 
+        # ================================================================
+        # 端到端 PyTorch CDF-G/h 构造参数：必须和训练端 argument.py 对齐。
+        # 现在 runtime_qp_mode='qpth' 时不再使用 JAX G/h，而是模型内部根据点云重新构造 G/h。
+        # ================================================================
+        self.use_learned_cdf_constraints = ros_bool(rospy.get_param('~use_learned_cdf_constraints', True), True)
+        self.cdf_l_k = float(rospy.get_param('~cdf_l_k', 0.33))
+        self.cdf_r_ego = float(rospy.get_param('~cdf_r_ego', 0.31))
+        self.cdf_sense_range = float(rospy.get_param('~cdf_sense_range', 3.0))
+        self.cdf_alpha_init = float(rospy.get_param('~cdf_alpha_init', 0.25))
+        self.cdf_alpha_min = float(rospy.get_param('~cdf_alpha_min', 0.10))
+        self.cdf_alpha_max = float(rospy.get_param('~cdf_alpha_max', 0.55))
+        self.learnable_cdf_alpha = ros_bool(rospy.get_param('~learnable_cdf_alpha', True), True)
+        self.cdf_epsilon_init = float(rospy.get_param('~cdf_epsilon_init', 0.1))
+        self.cdf_epsilon_min = float(rospy.get_param('~cdf_epsilon_min', 0.05))
+        self.cdf_epsilon_max = float(rospy.get_param('~cdf_epsilon_max', 0.20))
+        self.learnable_cdf_epsilon = ros_bool(rospy.get_param('~learnable_cdf_epsilon', True), True)
+        self.cdf_rho_floor_init = float(rospy.get_param('~cdf_rho_floor_init', 0.0))
+        self.learnable_cdf_rho_floor = ros_bool(rospy.get_param('~learnable_cdf_rho_floor', False), False)
+        self.cdf_margin_init = float(rospy.get_param('~cdf_margin_init', 0.0))
+        self.learnable_cdf_margin = ros_bool(rospy.get_param('~learnable_cdf_margin', False), False)
+        self.cdf_valid_point_abs_max = float(rospy.get_param('~cdf_valid_point_abs_max', 50.0))
+        self.cdf_padding_value = float(rospy.get_param('~cdf_padding_value', 99.0))
+        self.lambda_gh = float(rospy.get_param('~lambda_gh', 0.001))
+
         # qpth debug 日志默认关闭，避免 RViz 测试刷屏
         self.enable_qp_debug = ros_bool(rospy.get_param('~enable_qp_debug', False), False)
         self.qp_debug_every_n = max(1, int(rospy.get_param('~qp_debug_every_n', 10)))
@@ -106,7 +131,7 @@ class ParametricEllipseTracker:
         # 静态障碍物配置：圆形半径 0.5m，小车自身物理半径 r_ego=0.31m，安全临界距离阈值 = 0.5 + 0.31 = 0.81m
         self.obstacles = np.array([
             [5.0, 0.05],
-            # [6.5, -0.5],
+            [6.5, -0.5],
             # [8.0, -2.5],
             [10.0, -0.5]
         ])
@@ -176,8 +201,8 @@ class ParametricEllipseTracker:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
-        self.__sub_curr_state = rospy.Subscriber('/curr_state', Float32MultiArray, self.pose_callback, queue_size=10)
-        self.__sub_global_cloud = rospy.Subscriber('/densitynet_input_points', PointCloud2, self.cloud_callback, queue_size=10)
+        self.__sub_curr_state = rospy.Subscriber('/curr_state', Float32MultiArray, self.pose_callback, queue_size=1)
+        self.__sub_global_cloud = rospy.Subscriber('/densitynet_input_points', PointCloud2, self.cloud_callback, queue_size=1)
         self.marker_pub = rospy.Publisher('/target_goal_marker', Marker, queue_size=1)
         self.apply_fixed_obstacles_to_gazebo()
         
@@ -187,66 +212,86 @@ class ParametricEllipseTracker:
 
         rospy.loginfo("🚀【DAgger 可微参数化自监督测试系统】部署就位！已挂载 10 回合全自动化在线指标考核大闸")
 
+    def build_model_kwargs(self):
+        """根据当前 model.py 的 UNet.__init__ 签名过滤参数，避免测试端/训练端轻微版本差异导致 TypeError。"""
+        candidate_kwargs = {
+            'state_dim': 4,
+            'hidden_dim': self.model_hidden_dim,
+            'graph_k': self.model_graph_k,
+            'lambda_smooth': self.model_lambda_smooth,
+            'qp_limit': self.model_qp_limit,
+            'use_qp_box_constraints': self.use_qp_box_constraints,
+            'qp_jitter': self.qp_jitter,
+            'qp_normalize_constraints': self.qp_normalize_constraints,
+            'qp_constraint_scale_floor': self.qp_constraint_scale_floor,
+            'qp_box_eps': self.qp_box_eps,
+            'qp_max_iter': self.qp_max_iter,
+            'qp_eps': self.qp_eps,
+            'qp_not_improved_lim': self.qp_not_improved_lim,
+            'qp_fail_mode': self.qp_fail_mode,
+            'learnable_lambda_smooth': self.learnable_lambda_smooth,
+            'lambda_smooth_min': self.lambda_smooth_min,
+            'lambda_smooth_max': self.lambda_smooth_max,
+            'lambda_reg_weight': self.lambda_reg_weight,
+            'use_learned_cdf_constraints': self.use_learned_cdf_constraints,
+            'cdf_l_k': self.cdf_l_k,
+            'cdf_r_ego': self.cdf_r_ego,
+            'cdf_sense_range': self.cdf_sense_range,
+            'cdf_alpha_init': self.cdf_alpha_init,
+            'cdf_alpha_min': self.cdf_alpha_min,
+            'cdf_alpha_max': self.cdf_alpha_max,
+            'cdf_epsilon_init': self.cdf_epsilon_init,
+            'cdf_epsilon_min': self.cdf_epsilon_min,
+            'cdf_epsilon_max': self.cdf_epsilon_max,
+            'cdf_rho_floor_init': self.cdf_rho_floor_init,
+            'cdf_margin_init': self.cdf_margin_init,
+            'learnable_cdf_alpha': self.learnable_cdf_alpha,
+            'learnable_cdf_epsilon': self.learnable_cdf_epsilon,
+            'learnable_cdf_rho_floor': self.learnable_cdf_rho_floor,
+            'learnable_cdf_margin': self.learnable_cdf_margin,
+            'cdf_valid_point_abs_max': self.cdf_valid_point_abs_max,
+            'cdf_padding_value': self.cdf_padding_value,
+            'gh_loss_weight': self.lambda_gh,
+            'enable_timing_debug': False,
+            'timing_sync_cuda': False,
+            'qp_suppress_qpth_warnings': self.qp_suppress_qpth_warnings,
+            'ablation': 'full',
+        }
+        signature = inspect.signature(UNet.__init__)
+        supported = set(signature.parameters.keys())
+        return {k: v for k, v in candidate_kwargs.items() if k in supported}
+
     def load_model(self):
         model_path = rospy.get_param(
             '~model_path',
-            "/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt"
+            "/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/learnable/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt"
         )
         try:
-            # 先加载 state_dict，再根据 checkpoint 内容决定是否必须启用 learnable lambda。
-            # 如果 checkpoint 中含 safety_layer.lambda_raw / lambda_prior，而模型构造时没启用
-            # learnable_lambda_smooth=True，就会出现 Unexpected key。
             state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
+
             ckpt_has_learnable_lambda = (
                 'safety_layer.lambda_raw' in state_dict
                 or 'safety_layer.lambda_prior' in state_dict
             )
+            ckpt_has_learned_cdf = any(str(k).startswith('cdf_constraint_layer.') for k in state_dict.keys())
 
             if ckpt_has_learnable_lambda and not self.learnable_lambda_smooth:
-                rospy.logwarn(
-                    "⚠️ checkpoint 包含 safety_layer.lambda_raw/lambda_prior，"
-                    "自动强制 learnable_lambda_smooth=True 以匹配模型结构。"
-                )
+                rospy.logwarn("checkpoint 含 learnable lambda，自动开启 learnable_lambda_smooth=True")
                 self.learnable_lambda_smooth = True
 
-            if (not ckpt_has_learnable_lambda) and self.learnable_lambda_smooth:
-                rospy.logwarn(
-                    "⚠️ checkpoint 不包含 learnable lambda 参数，但当前 learnable_lambda_smooth=True。"
-                    "如果 strict=True 加载失败，请确认你是否正在加载旧的 fixed-lambda 模型。"
-                )
+            if ckpt_has_learned_cdf and not self.use_learned_cdf_constraints:
+                rospy.logwarn("checkpoint 含 cdf_constraint_layer.*，自动开启 use_learned_cdf_constraints=True")
+                self.use_learned_cdf_constraints = True
 
-            model = UNet(
-                state_dim=4,
-                hidden_dim=self.model_hidden_dim,
-                graph_k=self.model_graph_k,
-                lambda_smooth=self.model_lambda_smooth,
-                qp_limit=self.model_qp_limit,
-                use_qp_box_constraints=self.use_qp_box_constraints,
-                qp_jitter=self.qp_jitter,
-                qp_normalize_constraints=self.qp_normalize_constraints,
-                qp_constraint_scale_floor=self.qp_constraint_scale_floor,
-                qp_box_eps=self.qp_box_eps,
-                qp_max_iter=self.qp_max_iter,
-                qp_eps=self.qp_eps,
-                qp_not_improved_lim=self.qp_not_improved_lim,
-                qp_fail_mode=self.qp_fail_mode,
-                learnable_lambda_smooth=self.learnable_lambda_smooth,
-                lambda_smooth_min=self.lambda_smooth_min,
-                lambda_smooth_max=self.lambda_smooth_max,
-                lambda_reg_weight=self.lambda_reg_weight,
-                qp_suppress_qpth_warnings=self.qp_suppress_qpth_warnings,
-                ablation='full',
-            )
+            model_kwargs = self.build_model_kwargs()
+            model = UNet(**model_kwargs)
 
             try:
                 model.load_state_dict(state_dict, strict=True)
             except RuntimeError as strict_e:
-                rospy.logerr(
-                    "strict=True 加载失败。通常原因是测试端 model.py 与训练端 model.py 不一致，"
-                    "或者 learnable_lambda_smooth 设置和 checkpoint 不匹配。"
-                )
-                rospy.logerr(f"checkpoint_has_learnable_lambda={ckpt_has_learnable_lambda}, "
-                             f"runtime_learnable_lambda_smooth={self.learnable_lambda_smooth}")
+                rospy.logerr("strict=True 加载失败：通常是测试端 model.py 与训练端 model.py 不一致。")
+                rospy.logerr(f"ckpt_has_learnable_lambda={ckpt_has_learnable_lambda}, ckpt_has_learned_cdf={ckpt_has_learned_cdf}")
+                rospy.logerr(f"model_kwargs={model_kwargs}")
                 raise strict_e
 
             model = model.to(self.device).eval()
@@ -258,18 +303,25 @@ class ParametricEllipseTracker:
             except Exception:
                 pass
 
+            cdf_info = {}
+            try:
+                if hasattr(model, 'cdf_parameter_dict'):
+                    cdf_info = model.cdf_parameter_dict()
+            except Exception:
+                cdf_info = {}
+
             rospy.loginfo(
-                f"🎉【QP对齐版 DensityNet】装载成功！mode={self.runtime_qp_mode}, "
+                f"🎉【Learned-CDF DensityNet】装载成功！mode={self.runtime_qp_mode}, "
                 f"graph_k={self.model_graph_k}, hidden_dim={self.model_hidden_dim}, "
                 f"lambda={lambda_info:.4f}, learnable_lambda={self.learnable_lambda_smooth}, "
-                f"ckpt_has_learnable_lambda={ckpt_has_learnable_lambda}, "
+                f"use_learned_cdf={self.use_learned_cdf_constraints}, cdf={cdf_info}, "
                 f"box={self.use_qp_box_constraints}, normalize={self.qp_normalize_constraints}"
             )
             return model
 
         except Exception as e:
             rospy.logerr(f"参数化模型加载灾难性断层: {str(e)}")
-            raise RuntimeError(f"模型加载错误") from e
+            raise RuntimeError("模型加载错误") from e
 
     def predict_network_unom(self, state_tensor, points_batch):
         """
@@ -290,6 +342,38 @@ class ParametricEllipseTracker:
             fused = self.model.fusion(geo_feat)
 
         return self.model.head(fused) * self.model_qp_limit
+
+    def make_points_batch(self, local_pts_np):
+        pc = np.asarray(local_pts_np, dtype=np.float32)
+        if pc.ndim != 2 or pc.shape[0] == 0:
+            pc = np.zeros((1, 2), dtype=np.float32)
+        else:
+            pc = pc[:, :2]
+
+        # DynamicEdgeConv / knn_graph 至少需要 k+1 个点。
+        min_points = max(2, int(self.model_graph_k) + 1)
+        if pc.shape[0] < min_points:
+            pad = np.repeat(pc[-1:, :], repeats=min_points - pc.shape[0], axis=0)
+            pc = np.vstack([pc, pad]).astype(np.float32)
+
+        pos_tensor = torch.tensor(pc, dtype=torch.float32)
+        return Batch.from_data_list([Data(pos=pos_tensor)]).to(self.device)
+
+    def run_model_learned_cdf_qpth(self, state_tensor, points_batch):
+        # model.forward 内部会根据点云和 u_nom 重新构造 PyTorch CDF-G/h；
+        # 这里的 dummy G/h 只是为了兼容 forward 签名，不会被 use_learned_cdf_constraints=True 的模型使用。
+        dummy_G = torch.zeros((1, 1, 6), dtype=torch.float32, device=self.device)
+        dummy_h = torch.zeros((1, 1), dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            out = self.model(state_tensor, points_batch, dummy_G, dummy_h)
+            if isinstance(out, (tuple, list)):
+                u_safe_tensor, u_nom_tensor = out[0], out[1]
+            else:
+                u_safe_tensor = out
+                u_nom_tensor = None
+        u_safe_np = u_safe_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+        u_nom_np = None if u_nom_tensor is None else u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+        return u_safe_np, u_nom_np
 
     def clip_u_ctrl_to_cmd(self, u_ctrl_np):
         """
@@ -344,7 +428,7 @@ class ParametricEllipseTracker:
     def apply_fixed_obstacles_to_gazebo(self):
         fixed_obstacles = [
             [5.0, 0.05],
-            # [6.5, -0.5],
+            [6.5, -0.5],
             # [8.0, -2.5],
             [10.0, -0.5],
         ]
@@ -515,79 +599,90 @@ class ParametricEllipseTracker:
             u_safe_np = analytic_u_nom.astype(np.float32)
 
         else:
-            # B1. 构造网络点云输入：不要 pad 99，保持真实点云分布和训练一致。
-            pos_tensor = torch.tensor(self.pointcloud_local, dtype=torch.float32)
-            points_batch = Batch.from_data_list([Data(pos=pos_tensor)]).to(self.device)
+            # B1. 构造网络点云输入：保持真实点云分布和训练一致，同时保证点数 >= graph_k+1。
+            local_pts_np = self.pointcloud_local.astype(np.float32)
+            points_batch = self.make_points_batch(local_pts_np)
 
-            # B2. 先让网络 head 输出 u_nom。
-            with torch.no_grad():
-                u_nom_tensor = self.predict_network_unom(state_tensor, points_batch)
-                u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+            u_nom_np = None
+            u_jax_np = None
 
-            # 防止网络偶发输出越界；这里限幅的是 QP 输入，不是最终执行命令。
-            u_nom_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
+            if self.runtime_qp_mode == 'nominal':
+                # 只执行网络 nominal head，不经过任何安全层，用于 baseline。
+                with torch.no_grad():
+                    u_nom_tensor = self.predict_network_unom(state_tensor, points_batch)
+                u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+                u_safe_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
 
-            # B3. 用“网络预测的 u_nom”重新计算当前帧 SDF-CDF-QP 的 G/h。
-            # 这一点非常关键：不要再用 analytic_u_nom 去生成 G/h，否则和新版训练的 head->QP 流程不完全一致。
-            ego_p_local_jax = np.array([l_k, 0.0], dtype=np.float32)
-            fixed_size = 200
-            local_pts_for_qp = self.pointcloud_local.astype(np.float32)
-            if local_pts_for_qp.shape[0] > fixed_size:
-                local_pts_for_qp = local_pts_for_qp[:fixed_size]
-            elif local_pts_for_qp.shape[0] < fixed_size:
-                pad_box = np.full((fixed_size - local_pts_for_qp.shape[0], 2), 99.0, dtype=np.float32)
-                local_pts_for_qp = np.vstack([local_pts_for_qp, pad_box])
+            elif self.runtime_qp_mode == 'jax':
+                # 对照模式：网络给 u_nom，JAX/ProxQP 用 data_generate.py 内的 CDF 构造做安全投影。
+                with torch.no_grad():
+                    u_nom_tensor = self.predict_network_unom(state_tensor, points_batch)
+                u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+                u_nom_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
 
-            sol_6d_raw, G_extracted, h_extracted = self.local_expert.solve_agent_qp_local(
-                ego_p_local_jax,
-                u_nom_np,
-                local_pts_for_qp,
-                target_local_np
-            )
+                ego_p_local_jax = np.array([l_k, 0.0], dtype=np.float32)
+                fixed_size = 200
+                local_pts_for_qp = local_pts_np
+                if local_pts_for_qp.shape[0] > fixed_size:
+                    local_pts_for_qp = local_pts_for_qp[:fixed_size]
+                elif local_pts_for_qp.shape[0] < fixed_size:
+                    pad_box = np.full((fixed_size - local_pts_for_qp.shape[0], 2), 99.0, dtype=np.float32)
+                    local_pts_for_qp = np.vstack([local_pts_for_qp, pad_box]).astype(np.float32)
 
-            if self.runtime_qp_mode == 'jax':
-                # 推荐部署模式：网络只学 u_nom，安全投影交给更稳定的 JAX/ProxQP。
-                u_safe_np = np.array(sol_6d_raw[:2], dtype=np.float32)
+                sol_6d_raw, _, _ = self.local_expert.solve_agent_qp_local(
+                    ego_p_local_jax,
+                    u_nom_np,
+                    local_pts_for_qp,
+                    target_local_np
+                )
+                u_jax_np = np.array(sol_6d_raw[:2], dtype=np.float32)
+                u_safe_np = u_jax_np
 
             else:
-                # 验证 PyTorch qpth safety_layer 本身。
-                # 若 qpth 极少数帧失败，RViz 闭环默认 fallback 到 JAX，避免机器人失控；
-                # 如果你要严格验证 qpth，可将 ~qpth_fail_fallback_to_jax 设为 false。
-                G_cdf_tensor = torch.tensor(G_extracted, dtype=torch.float32).unsqueeze(0).to(self.device)
-                h_cdf_tensor = torch.tensor(h_extracted, dtype=torch.float32).unsqueeze(0).to(self.device)
+                # 正式验证当前训练得到的 learned PyTorch CDF-QP safety layer。
                 try:
-                    with torch.no_grad():
-                        if getattr(self.model, 'use_safety_layer', True):
-                            u_safe_tensor = self.model.safety_layer(
-                                torch.tensor(u_nom_np, dtype=torch.float32).unsqueeze(0).to(self.device),
-                                G_cdf_tensor,
-                                h_cdf_tensor
-                            )
-                        else:
-                            u_safe_tensor = torch.tensor(u_nom_np, dtype=torch.float32).unsqueeze(0).to(self.device)
-                        u_safe_np = u_safe_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)
+                    u_safe_np, u_nom_np = self.run_model_learned_cdf_qpth(state_tensor, points_batch)
+                    u_safe_np = np.clip(u_safe_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
                 except Exception as e_qpth:
-                    if self.qpth_fail_fallback_to_jax:
-                        rospy.logwarn_throttle(
-                            1.0,
-                            f"[qpth runtime fallback] qpth safety_layer failed, fallback to JAX/ProxQP. err={repr(e_qpth)}"
-                        )
-                        u_safe_np = np.array(sol_6d_raw[:2], dtype=np.float32)
-                    else:
+                    if not self.qpth_fail_fallback_to_jax:
                         raise
 
+                    rospy.logwarn_throttle(
+                        1.0,
+                        f"[learned-cdf qpth runtime fallback] model.forward failed, fallback to JAX/ProxQP. err={repr(e_qpth)}"
+                    )
+                    with torch.no_grad():
+                        u_nom_tensor = self.predict_network_unom(state_tensor, points_batch)
+                    u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+                    u_nom_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
+
+                    ego_p_local_jax = np.array([l_k, 0.0], dtype=np.float32)
+                    fixed_size = 200
+                    local_pts_for_qp = local_pts_np
+                    if local_pts_for_qp.shape[0] > fixed_size:
+                        local_pts_for_qp = local_pts_for_qp[:fixed_size]
+                    elif local_pts_for_qp.shape[0] < fixed_size:
+                        pad_box = np.full((fixed_size - local_pts_for_qp.shape[0], 2), 99.0, dtype=np.float32)
+                        local_pts_for_qp = np.vstack([local_pts_for_qp, pad_box]).astype(np.float32)
+                    sol_6d_raw, _, _ = self.local_expert.solve_agent_qp_local(
+                        ego_p_local_jax, u_nom_np, local_pts_for_qp, target_local_np
+                    )
+                    u_jax_np = np.array(sol_6d_raw[:2], dtype=np.float32)
+                    u_safe_np = u_jax_np
+
             if self.enable_qp_debug and (self.control_step_count % self.qp_debug_every_n == 0):
+                cdf_info = {}
+                try:
+                    if hasattr(self.model, 'cdf_parameter_dict'):
+                        cdf_info = self.model.cdf_parameter_dict()
+                except Exception:
+                    pass
                 rospy.logwarn(
-                    f"[QP DEBUG] "
-                    f"mode={self.runtime_qp_mode}, "
-                    f"u_nom={u_nom_np}, "
-                    f"u_jax={np.array(sol_6d_raw[:2], dtype=np.float32)}, "
-                    f"u_exec={u_safe_np}, "
-                    f"|jax-nom|={np.linalg.norm(np.array(sol_6d_raw[:2], dtype=np.float32)-u_nom_np):.4f}, "
-                    f"|exec-nom|={np.linalg.norm(u_safe_np-u_nom_np):.4f}, "
-                    f"|exec-jax|={np.linalg.norm(u_safe_np-np.array(sol_6d_raw[:2], dtype=np.float32)):.4f}, "
-                    f"qpth_warn_count={getattr(self.model.safety_layer, '_qp_warning_count', -1)}, "
-                    f"qpth_bad_solution_count={getattr(self.model.safety_layer, '_qp_bad_solution_count', -1)}"
+                    f"[RUNTIME DEBUG] mode={self.runtime_qp_mode}, "
+                    f"u_nom={u_nom_np}, u_exec={u_safe_np}, u_jax={u_jax_np}, "
+                    f"|exec-nom|={-1.0 if u_nom_np is None else np.linalg.norm(u_safe_np-u_nom_np):.4f}, "
+                    f"cdf={cdf_info}, "
+                    f"qpth_warn_count={getattr(getattr(self.model, 'safety_layer', None), '_qp_warning_count', -1)}"
                 )
 
         # C. 最终命令限幅与发布。last_executed_* 保存 u_ctrl=[v,L*omega]，和训练 X 后两维一致。

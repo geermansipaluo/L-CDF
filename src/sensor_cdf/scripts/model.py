@@ -1,14 +1,55 @@
 #!/usr/bin/env python3
 import math
-import contextlib
-import io
-import warnings
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import DynamicEdgeConv, global_max_pool, knn_graph, GATConv
+from torch_geometric.utils import to_dense_batch
 #  引入 BarrierNet 同款工业级可微参数化凸优化层
 from qpth.qp import QPFunction, QPSolvers
+
+
+class TimingMixin:
+    def _init_timing(self, enable_timing_debug=False, timing_sync_cuda=True):
+        self.enable_timing_debug = bool(enable_timing_debug)
+        self.timing_sync_cuda = bool(timing_sync_cuda)
+        self._timing_stats = {}
+
+    def _timing_now(self, device=None):
+        if self.enable_timing_debug and self.timing_sync_cuda and torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize(device=device)
+            except Exception:
+                torch.cuda.synchronize()
+        return time.perf_counter()
+
+    def _timing_add(self, name, start_time, device=None):
+        if not getattr(self, "enable_timing_debug", False):
+            return
+        if self.timing_sync_cuda and torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize(device=device)
+            except Exception:
+                torch.cuda.synchronize()
+        dt = time.perf_counter() - start_time
+        stat = self._timing_stats.setdefault(name, [0.0, 0])
+        stat[0] += float(dt)
+        stat[1] += 1
+
+    def reset_timing_stats(self):
+        self._timing_stats = {}
+
+    def get_timing_report(self, prefix=""):
+        report = {}
+        for k, (total, count) in getattr(self, "_timing_stats", {}).items():
+            report[prefix + k] = {
+                "total": float(total),
+                "count": int(count),
+                "avg": float(total) / max(int(count), 1),
+            }
+        return report
+
 
 class GeometricEncoder(nn.Module):
     def __init__(self, in_dim=2, hidden_dim=512, k=10):
@@ -86,7 +127,308 @@ class GeometricEncoder(nn.Module):
         return x_global
 
 
-class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
+
+class DifferentiableLocalSdfCdfConstraintLayer(TimingMixin, nn.Module):
+    """
+    向量化 PyTorch 局部 SDF-CDF 约束构造层。
+
+    相比上一版逐样本 for-loop：
+      - 使用 to_dense_batch 把 PyG 点云转成 [B, Nmax, 2]；
+      - 一次性计算全 batch 的 min_dist / rho / z1 / z2；
+      - 只调用一次 torch.autograd.grad 得到 grad rho(ego_p)；
+      - 输出 G_cdf [B,1,6], h_cdf [B,1]。
+
+    注意：点云最近点 min 本身在最近点切换处不可导，但 alpha/epsilon/rho_floor/margin
+    仍然可通过 rho、z1/z2 和 QP loss 反传；这和原 JAX min-SDF 语义一致。
+    """
+    def __init__(
+        self,
+        l_k=0.33,
+        r_ego=0.31,
+        sense_range=3.0,
+        alpha_init=0.25,
+        alpha_min=0.10,
+        alpha_max=0.80,
+        epsilon_init=0.25,
+        epsilon_min=0.05,
+        epsilon_max=0.80,
+        rho_floor_init=0.0,
+        margin_init=0.0,
+        learnable_alpha=True,
+        learnable_epsilon=True,
+        learnable_rho_floor=False,
+        learnable_margin=False,
+        valid_point_abs_max=50.0,
+        padding_value=99.0,
+        eps=1e-6,
+        gh_reg_weight=0.0,
+        enable_timing_debug=False,
+        timing_sync_cuda=True,
+    ):
+        super().__init__()
+        TimingMixin._init_timing(self, enable_timing_debug=enable_timing_debug, timing_sync_cuda=timing_sync_cuda)
+        self.l_k = float(l_k)
+        self.r_ego = float(r_ego)
+        self.sense_range = float(sense_range)
+        self.alpha_min = float(alpha_min)
+        self.alpha_max = float(alpha_max)
+        self.epsilon_min = float(epsilon_min)
+        self.epsilon_max = float(epsilon_max)
+        self.valid_point_abs_max = float(valid_point_abs_max)
+        self.padding_value = float(padding_value)
+        self.eps = float(eps)
+        self.gh_reg_weight = float(gh_reg_weight)
+
+        if self.alpha_max <= self.alpha_min:
+            raise ValueError("alpha_max must be larger than alpha_min")
+        if self.epsilon_max <= self.epsilon_min:
+            raise ValueError("epsilon_max must be larger than epsilon_min")
+
+        def bounded_raw(init, lo, hi):
+            init = min(max(float(init), float(lo) + 1e-6), float(hi) - 1e-6)
+            ratio = (init - float(lo)) / (float(hi) - float(lo))
+            ratio = min(max(ratio, 1e-6), 1.0 - 1e-6)
+            return math.log(ratio / (1.0 - ratio))
+
+        alpha_raw_init = bounded_raw(alpha_init, self.alpha_min, self.alpha_max)
+        epsilon_raw_init = bounded_raw(epsilon_init, self.epsilon_min, self.epsilon_max)
+
+        if learnable_alpha:
+            self.alpha_raw = nn.Parameter(torch.tensor(alpha_raw_init, dtype=torch.float32))
+        else:
+            self.register_buffer("alpha_raw", torch.tensor(alpha_raw_init, dtype=torch.float32))
+
+        if learnable_epsilon:
+            self.epsilon_raw = nn.Parameter(torch.tensor(epsilon_raw_init, dtype=torch.float32))
+        else:
+            self.register_buffer("epsilon_raw", torch.tensor(epsilon_raw_init, dtype=torch.float32))
+
+        def inv_softplus(x):
+            x = max(float(x), 0.0)
+            if x < 1e-10:
+                return -20.0
+            return math.log(math.exp(x) - 1.0)
+
+        rho_floor_raw_init = inv_softplus(rho_floor_init)
+        margin_raw_init = inv_softplus(margin_init)
+
+        if learnable_rho_floor:
+            self.rho_floor_raw = nn.Parameter(torch.tensor(rho_floor_raw_init, dtype=torch.float32))
+        else:
+            self.register_buffer("rho_floor_raw", torch.tensor(rho_floor_raw_init, dtype=torch.float32))
+
+        if learnable_margin:
+            self.margin_raw = nn.Parameter(torch.tensor(margin_raw_init, dtype=torch.float32))
+        else:
+            self.register_buffer("margin_raw", torch.tensor(margin_raw_init, dtype=torch.float32))
+
+        self._last_G_cdf = None
+        self._last_h_cdf = None
+        self._last_alpha = None
+        self._last_epsilon = None
+        self._last_rho_floor = None
+        self._last_margin = None
+
+    def alpha_value(self):
+        return self.alpha_min + (self.alpha_max - self.alpha_min) * torch.sigmoid(self.alpha_raw)
+
+    def epsilon_value(self):
+        return self.epsilon_min + (self.epsilon_max - self.epsilon_min) * torch.sigmoid(self.epsilon_raw)
+
+    def rho_floor_value(self):
+        return F.softplus(self.rho_floor_raw)
+
+    def margin_value(self):
+        return F.softplus(self.margin_raw)
+
+    def get_param_dict(self):
+        return {
+            "cdf_alpha": float(self.alpha_value().detach().cpu().item()),
+            "cdf_epsilon": float(self.epsilon_value().detach().cpu().item()),
+            "cdf_rho_floor": float(self.rho_floor_value().detach().cpu().item()),
+            "cdf_margin": float(self.margin_value().detach().cpu().item()),
+        }
+
+    def regularization(self):
+        return self.alpha_value() * 0.0
+
+    @staticmethod
+    def _smooth_bump(c, b, eps=1e-6):
+        denom = c - b
+        denom = torch.where(torch.abs(denom) < eps, torch.full_like(denom, eps), denom)
+        m_k = c / denom
+        safe_mk = torch.clamp(m_k, 1e-5, 1.0 - 1e-5)
+        exp1 = torch.exp(-1.0 / safe_mk)
+        exp2 = torch.exp(-1.0 / (1.0 - safe_mk))
+        bump = exp1 / (exp1 + exp2)
+        return torch.where(c <= 0.0, torch.zeros_like(bump), torch.where(b >= 0.0, torch.ones_like(bump), bump))
+
+    def _dense_points_and_mask(self, points, batch_size, device, dtype):
+        """
+        PyG sparse points -> dense [B,N,2] + valid_mask [B,N]。
+        使用 torch_geometric.utils.to_dense_batch，避免 Python for-loop 按样本切点云。
+        """
+        pos = points.pos.to(device=device, dtype=dtype)
+        batch_idx = points.batch.to(device=device)
+
+        if pos.numel() == 0:
+            pts_dense = torch.full((batch_size, 1, 2), self.padding_value, device=device, dtype=dtype)
+            valid_mask = torch.zeros((batch_size, 1), device=device, dtype=torch.bool)
+            return pts_dense, valid_mask
+
+        pts_dense, mask = to_dense_batch(
+            pos,
+            batch_idx,
+            batch_size=batch_size,
+            fill_value=float(self.padding_value),
+        )
+        # pts_dense: [B,Nmax,2], mask: [B,Nmax]
+        finite = torch.isfinite(pts_dense).all(dim=2)
+        not_padding = ~(
+            (torch.abs(pts_dense[..., 0] - self.padding_value) < 1e-4)
+            & (torch.abs(pts_dense[..., 1] - self.padding_value) < 1e-4)
+        )
+        in_range = (
+            (torch.abs(pts_dense[..., 0]) < self.valid_point_abs_max)
+            & (torch.abs(pts_dense[..., 1]) < self.valid_point_abs_max)
+        )
+        valid_mask = mask & finite & not_padding & in_range
+        return pts_dense, valid_mask
+
+    def _rho_batch(self, p_local, target_local, pts_dense, valid_mask, alpha, rho_floor):
+        """
+        p_local:      [B,2]
+        target_local: [B,2]
+        pts_dense:    [B,N,2]
+        valid_mask:   [B,N]
+        return rho [B], psi [B]
+        """
+        B = p_local.shape[0]
+        diff = pts_dense - p_local.unsqueeze(1)
+        dists = torch.sqrt(torch.sum(diff ** 2, dim=2) + 1e-12)
+
+        large = torch.full_like(dists, 1e6)
+        dists = torch.where(valid_mask, dists, large)
+        min_dist = torch.min(dists, dim=1).values
+
+        # 若某个样本没有有效点，min_dist 会是 1e6。此时 b>=0, psi=1，等价于无近障碍。
+        c_val = min_dist - float(self.r_ego)
+        b_val = min_dist - float(self.sense_range)
+        psi = self._smooth_bump(c_val, b_val, eps=self.eps)
+
+        V_x = torch.sum((p_local - target_local) ** 2, dim=1)
+        rho = psi / (torch.pow(V_x + self.eps, alpha) + self.eps) + rho_floor
+        return rho, psi
+
+    def forward(self, state, points, u_nom):
+        # 即便 validation 外层用了 torch.no_grad()，这里也必须启用梯度：
+        # 需要一次 autograd.grad 计算 rho 对 ego 查询点的梯度。
+        t_total = self._timing_now(device=u_nom.device)
+        with torch.enable_grad():
+            batch_size = state.shape[0]
+            device = u_nom.device
+            dtype = u_nom.dtype
+
+            target_local = state[:, 0:2].to(device=device, dtype=dtype)
+
+            t0 = self._timing_now(device=device)
+            pts_dense, valid_mask = self._dense_points_and_mask(points, batch_size, device, dtype)
+            self._timing_add("cdf/dense_points", t0, device=device)
+
+            alpha = self.alpha_value().to(device=device, dtype=dtype)
+            epsilon = self.epsilon_value().to(device=device, dtype=dtype)
+            rho_floor = self.rho_floor_value().to(device=device, dtype=dtype)
+            margin = self.margin_value().to(device=device, dtype=dtype)
+
+            ego_p = torch.zeros(batch_size, 2, device=device, dtype=dtype)
+            ego_p[:, 0] = float(self.l_k)
+            ego_req = ego_p.detach().clone().requires_grad_(True)
+
+            t0 = self._timing_now(device=device)
+            rho_curr_for_grad, _ = self._rho_batch(
+                ego_req,
+                target_local,
+                pts_dense,
+                valid_mask,
+                alpha,
+                rho_floor,
+            )
+            grad_self = torch.autograd.grad(
+                rho_curr_for_grad.sum(),
+                ego_req,
+                create_graph=True,
+                retain_graph=True,
+                allow_unused=False,
+            )[0]
+            self._timing_add("cdf/rho_grad", t0, device=device)
+
+            t0 = self._timing_now(device=device)
+            norm_nom = torch.linalg.norm(u_nom, dim=1, keepdim=True)
+            default_nom = torch.zeros_like(u_nom)
+            default_nom[:, 0] = 1.0
+            dir_nom = torch.where(norm_nom > 1e-5, u_nom / (norm_nom + 1e-8), default_nom)
+            z1_pos = ego_p + epsilon * dir_nom
+
+            neg_grad = -grad_self
+            norm_grad = torch.linalg.norm(neg_grad, dim=1, keepdim=True)
+            default_safe = torch.zeros_like(u_nom)
+            default_safe[:, 1] = 1.0
+            dir_safe = torch.where(norm_grad > 1e-5, neg_grad / (norm_grad + 1e-8), default_safe)
+            z2_pos = ego_p + epsilon * dir_safe
+
+            v1 = dir_nom
+            v2_raw = dir_safe
+            det_v = v1[:, 0] * v2_raw[:, 1] - v1[:, 1] * v2_raw[:, 0]
+            v2_ortho = torch.stack([-v1[:, 1], v1[:, 0]], dim=1)
+            v2 = torch.where((torch.abs(det_v) > 1e-2).unsqueeze(1), v2_raw, v2_ortho)
+
+            # W = inverse([v1 v2])，每个样本一个 2x2。显式公式比 torch.linalg.inv 更轻。
+            a = v1[:, 0]
+            c = v1[:, 1]
+            b = v2[:, 0]
+            d = v2[:, 1]
+            det = a * d - b * c
+            det_safe = torch.where(
+                torch.abs(det) < 1e-6,
+                torch.where(det >= 0.0, torch.full_like(det, 1e-6), torch.full_like(det, -1e-6)),
+                det,
+            )
+            # V = [[a,b],[c,d]], inv(V) = 1/det [[d,-b],[-c,a]]
+            w1 = torch.stack([d / det_safe, -b / det_safe], dim=1)
+            w2 = torch.stack([-c / det_safe, a / det_safe], dim=1)
+            self._timing_add("cdf/dirs_and_basis", t0, device=device)
+
+            t0 = self._timing_now(device=device)
+            rho_curr, _ = self._rho_batch(ego_p, target_local, pts_dense, valid_mask, alpha, rho_floor)
+            rho_z1, _ = self._rho_batch(z1_pos, target_local, pts_dense, valid_mask, alpha, rho_floor)
+            rho_z2, _ = self._rho_batch(z2_pos, target_local, pts_dense, valid_mask, alpha, rho_floor)
+            self._timing_add("cdf/rho_curr_z1_z2", t0, device=device)
+
+            t0 = self._timing_now(device=device)
+            inv_eps = 1.0 / (epsilon + self.eps)
+            sum_w = w1 + w2
+            coeff_u = (rho_curr * inv_eps).unsqueeze(1) * sum_w
+            coeff_z1 = -(rho_z1 * inv_eps).unsqueeze(1) * w1
+            coeff_z2 = -(rho_z2 * inv_eps).unsqueeze(1) * w2
+
+            G_cdf = torch.zeros(batch_size, 1, 6, device=device, dtype=dtype)
+            G_cdf[:, 0, 0:2] = coeff_u
+            G_cdf[:, 0, 2:4] = coeff_z1
+            G_cdf[:, 0, 4:6] = coeff_z2
+
+            h_cdf = (-rho_curr - margin).view(batch_size, 1)
+            self._timing_add("cdf/build_Gh", t0, device=device)
+
+        self._timing_add("cdf/total", t_total, device=u_nom.device)
+        self._last_G_cdf = G_cdf
+        self._last_h_cdf = h_cdf
+        self._last_alpha = self.alpha_value().detach()
+        self._last_epsilon = self.epsilon_value().detach()
+        self._last_rho_floor = self.rho_floor_value().detach()
+        self._last_margin = self.margin_value().detach()
+        return G_cdf, h_cdf
+
+class DifferentiableSdfCdfSafetyLayer6D(TimingMixin, nn.Module):
     """
     6D 升维参数化可微安全层。
 
@@ -120,18 +462,15 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
         qp_invalid_h_eps=1e-6,
         qp_invalid_constraint_mode="warn",
         qp_invalid_debug_max_print=20,
-        qp_sanitize_redundant_constraints=True,
-        qp_redundant_constraint_h=1.0,
-        qp_verify_solution=True,
-        qp_solution_violation_tol=1e-3,
-        qp_solution_debug_max_print=20,
-        qp_suppress_qpth_warnings=True,
         learnable_lambda_smooth=False,
         lambda_smooth_min=0.1,
         lambda_smooth_max=80.0,
         lambda_reg_weight=1e-4,
+        enable_timing_debug=False,
+        timing_sync_cuda=True,
     ):
         super().__init__()
+        TimingMixin._init_timing(self, enable_timing_debug=enable_timing_debug, timing_sync_cuda=timing_sync_cuda)
 
         # ------------------------------------------------------------
         # 可学习 lambda_smooth 参数化：
@@ -215,21 +554,6 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
             )
         self.qp_invalid_debug_max_print = int(qp_invalid_debug_max_print)
 
-        # qpth 的内点法需要严格正 slack。
-        # 对于 G≈0 且 h≈0 的冗余约束 0*x<=0，数学上可行但没有严格内点，
-        # 容易导致 qpth 返回 None / inaccurate solution。
-        # 因此默认将这类约束改成 0*x<=1.0，相当于删除该冗余约束。
-        self.qp_sanitize_redundant_constraints = bool(qp_sanitize_redundant_constraints)
-        self.qp_redundant_constraint_h = float(qp_redundant_constraint_h)
-
-        # qpth 可能返回 tensor 但同时警告 residual large。
-        # 因此在返回前额外检查不等式约束违反量；
-        # 若明显违反，则按 qpth failure 处理，让 trainer skip batch。
-        self.qp_verify_solution = bool(qp_verify_solution)
-        self.qp_solution_violation_tol = float(qp_solution_violation_tol)
-        self.qp_solution_debug_max_print = int(qp_solution_debug_max_print)
-        self.qp_suppress_qpth_warnings = bool(qp_suppress_qpth_warnings)
-
         # 统计量：用于 trainer 每个 epoch 打印 fail_rate
         self._qp_warning_count = 0
         self._qp_call_count = 0
@@ -237,10 +561,6 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
         self._qp_invalid_warning_count = 0
         self._qp_invalid_zero_count = 0
         self._qp_infeasible_main_count = 0
-        self._qp_redundant_zero_count = 0
-        self._qp_bad_solution_count = 0
-        self._qp_solution_warning_count = 0
-        self._qp_last_max_violation = 0.0
 
     def lambda_smooth_value(self):
         """
@@ -276,9 +596,6 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
         self._qp_fail_count = 0
         self._qp_invalid_zero_count = 0
         self._qp_infeasible_main_count = 0
-        self._qp_redundant_zero_count = 0
-        self._qp_bad_solution_count = 0
-        self._qp_last_max_violation = 0.0
 
     def get_qp_stats(self):
         fail_rate = self._qp_fail_count / max(self._qp_call_count, 1)
@@ -289,9 +606,6 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
             "qp_warning_count": self._qp_warning_count,
             "qp_invalid_zero_count": self._qp_invalid_zero_count,
             "qp_infeasible_main_count": self._qp_infeasible_main_count,
-            "qp_redundant_zero_count": self._qp_redundant_zero_count,
-            "qp_bad_solution_count": self._qp_bad_solution_count,
-            "qp_last_max_violation": self._qp_last_max_violation,
         }
 
     @staticmethod
@@ -439,114 +753,6 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
                 f"zero_bad={zero_count}, infeasible_main={infeasible_count}"
             )
 
-    def _sanitize_redundant_zero_constraints(self, G_main, h_main):
-        """
-        将 G≈0 且 h≈0 的冗余约束 0*x<=0 改成 0*x<=positive。
-
-        原因：
-        - 0*x<=0 数学上等价于无约束，但 slack 恒等于 0；
-        - qpth 的 primal-dual interior point method 需要严格正 slack；
-        - 这种冗余边界约束会导致 qpth 返回 None 或 inaccurate solution。
-
-        注意：
-        - 若 G≈0 且 h<0，这是真正不可行约束，不在这里修；
-        - 这里只处理 h≈0 或 h>=0 的冗余零行。
-        """
-        if not self.qp_sanitize_redundant_constraints:
-            return G_main, h_main
-
-        if G_main.numel() == 0 or h_main.numel() == 0:
-            return G_main, h_main
-
-        G_norm = torch.linalg.norm(G_main, dim=2)  # [B, M]
-        redundant_zero = (
-            (G_norm < self.qp_invalid_g_norm_eps)
-            & (h_main >= -self.qp_invalid_h_eps)
-        )
-
-        redundant_count = int(redundant_zero.detach().sum().item())
-        if redundant_count <= 0:
-            return G_main, h_main
-
-        self._qp_redundant_zero_count += redundant_count
-
-        # 避免 in-place 修改原输入张量导致 autograd/qpth 侧问题。
-        h_sanitized = torch.where(
-            redundant_zero,
-            torch.full_like(h_main, float(self.qp_redundant_constraint_h)),
-            h_main,
-        )
-
-        if self._qp_invalid_warning_count < self.qp_invalid_debug_max_print:
-            print(
-                f"⚠️ [QP SANITIZE] replaced redundant zero constraints "
-                f"0*x<=0 by 0*x<={self.qp_redundant_constraint_h}; "
-                f"count={redundant_count}"
-            )
-
-        return G_main, h_sanitized
-
-    def _verify_qp_solution(self, sol_6d, G_all, h_all):
-        """
-        qpth 有时会返回 Tensor，但同时警告 residual large。
-        这里至少检查 primal inequality feasibility:
-            G_all x - h_all <= tol
-
-        如果明显违反约束，则当作 qpth failure，让 trainer 在 skip 模式下跳过该 batch。
-        """
-        if not self.qp_verify_solution:
-            return
-
-        with torch.no_grad():
-            lhs = torch.bmm(G_all, sol_6d.unsqueeze(-1)).squeeze(-1)
-            violation = lhs - h_all
-            max_violation = violation.max()
-            max_violation_value = float(max_violation.detach().cpu().item())
-            self._qp_last_max_violation = max_violation_value
-
-            if max_violation_value <= self.qp_solution_violation_tol:
-                return
-
-            self._qp_bad_solution_count += 1
-            self._qp_fail_count += 1
-            self._qp_solution_warning_count += 1
-
-            if self._qp_solution_warning_count <= self.qp_solution_debug_max_print:
-                print("\n" + "#" * 100)
-                print(
-                    f"❌ [QP BAD SOLUTION] qpth returned a tensor but violates inequality constraints: "
-                    f"max_violation={max_violation_value:.6e}, "
-                    f"tol={self.qp_solution_violation_tol:.6e}, "
-                    f"fail_mode={self.qp_fail_mode}"
-                )
-                print(self._tensor_debug_string("sol_6d", sol_6d))
-                print(self._tensor_debug_string("ineq_violation=Gx-h", violation))
-                print(self._tensor_debug_string("G_all", G_all))
-                print(self._tensor_debug_string("h_all", h_all))
-                bad_idx = torch.nonzero(violation > self.qp_solution_violation_tol, as_tuple=False)[:8]
-                examples = []
-                for pair in bad_idx.detach().cpu().tolist():
-                    b, m = int(pair[0]), int(pair[1])
-                    examples.append(
-                        {
-                            "batch": b,
-                            "constraint": m,
-                            "violation": float(violation[b, m].detach().cpu().item()),
-                            "lhs": float(lhs[b, m].detach().cpu().item()),
-                            "h": float(h_all[b, m].detach().cpu().item()),
-                        }
-                    )
-                print(f"bad_solution_examples(first_8)={examples}")
-                print("#" * 100 + "\n")
-            elif self._qp_solution_warning_count == self.qp_solution_debug_max_print + 1:
-                print("❌ [QP BAD SOLUTION] 后续 bad solution 详细诊断将静默统计，不再刷屏。")
-
-        if self.qp_fail_mode in ("raise", "skip"):
-            raise RuntimeError(
-                f"qpth_failed_in_safety_layer: returned_solution_violates_constraints "
-                f"max_violation={self._qp_last_max_violation:.6e}"
-            )
-
     def forward(self, u_nom, G_cdf_6d, h_cdf):
         """
         u_nom: [B, 2]
@@ -558,6 +764,8 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
         batch_size = u_nom.shape[0]
         device = u_nom.device
         dtype = u_nom.dtype
+        t_total = self._timing_now(device=device)
+        t0 = self._timing_now(device=device)
 
         # 1. 重组 6x6 Hessian
         # 注意：这里必须保持 lambda_smooth 为 Tensor，不能 float(...)，
@@ -594,6 +802,9 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
         g_in = torch.zeros(batch_size, 6, device=device, dtype=dtype)
         g_in[:, 0:2] = -2.0 * u_nom
 
+        self._timing_add("safety/build_objective", t0, device=device)
+        t0 = self._timing_now(device=device)
+
         # 3. 主 CDF 约束
         G_main = G_cdf_6d.to(device=device, dtype=dtype)
         h_main = h_cdf.to(device=device, dtype=dtype)
@@ -604,10 +815,6 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
 
         # 在任何归一化之前检查原始 G/h，方便直接定位专家数据中的异常约束。
         self._check_constraint_pathologies(G_main, h_main, stage="raw_before_normalization")
-
-        # qpth 不喜欢 0*x<=0 这种无严格内点的冗余约束。
-        # 它数学上等价于无约束，因此安全地改成 0*x<=positive。
-        G_main, h_main = self._sanitize_redundant_zero_constraints(G_main, h_main)
 
         if self.qp_normalize_constraints:
             row_scale = torch.linalg.norm(G_main, dim=2, keepdim=True)
@@ -636,35 +843,26 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
             G_all = G_main
             h_all = h_main
 
+        self._timing_add("safety/build_constraints", t0, device=device)
+
         # 5. 空等式约束
         e = torch.empty(0, device=device, dtype=dtype)
         A = torch.empty(0, device=device, dtype=dtype)
 
         try:
-            qp_solver = QPFunction(
+            t0 = self._timing_now(device=device)
+            sol_6d = QPFunction(
                 verbose=False,
                 solver=QPSolvers.PDIPM_BATCHED,
                 maxIter=self.qp_max_iter,
                 eps=self.qp_eps,
                 notImprovedLim=self.qp_not_improved_lim,
-            )
+            )(P_in, g_in, G_all, h_all, e, A)
 
-            if self.qp_suppress_qpth_warnings:
-                # qpth 有时会打印 residual warning，但我们后面会自己检查 feasibility。
-                # 为了不刷屏，默认屏蔽 qpth 内部 stdout/stderr/warnings。
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                        sol_6d = qp_solver(P_in, g_in, G_all, h_all, e, A)
-            else:
-                sol_6d = qp_solver(P_in, g_in, G_all, h_all, e, A)
+            self._timing_add("safety/qpth_solve", t0, device=device)
 
             if torch.isnan(sol_6d).any() or torch.isinf(sol_6d).any():
                 raise ValueError("qpth_nan_or_inf_detected")
-
-            # qpth 可能返回 tensor 但 warning residual large；
-            # 对这类情况至少检查 primal inequality violation。
-            self._verify_qp_solution(sol_6d, G_all, h_all)
 
         except Exception as e_qp:
             self._qp_fail_count += 1
@@ -694,9 +892,10 @@ class DifferentiableSdfCdfSafetyLayer6D(nn.Module):
             sol_6d = torch.zeros(batch_size, 6, device=device, dtype=dtype)
             sol_6d[:, 0:2] = u_nom
 
+        self._timing_add("safety/total", t_total, device=device)
         return sol_6d[:, 0:2]
 
-class UNet(nn.Module):
+class UNet(TimingMixin, nn.Module):
     def __init__(
         self,
         state_dim=4,
@@ -719,23 +918,43 @@ class UNet(nn.Module):
         qp_invalid_h_eps=1e-6,
         qp_invalid_constraint_mode="warn",
         qp_invalid_debug_max_print=20,
-        qp_sanitize_redundant_constraints=True,
-        qp_redundant_constraint_h=1.0,
-        qp_verify_solution=True,
-        qp_solution_violation_tol=1e-3,
-        qp_solution_debug_max_print=20,
-        qp_suppress_qpth_warnings=True,
         learnable_lambda_smooth=False,
         lambda_smooth_min=0.1,
         lambda_smooth_max=80.0,
         lambda_reg_weight=1e-4,
+        use_learned_cdf_constraints=False,
+        cdf_l_k=0.33,
+        cdf_r_ego=0.31,
+        cdf_sense_range=3.0,
+        cdf_alpha_init=0.25,
+        cdf_alpha_min=0.10,
+        cdf_alpha_max=0.80,
+        cdf_epsilon_init=0.25,
+        cdf_epsilon_min=0.05,
+        cdf_epsilon_max=0.80,
+        cdf_rho_floor_init=0.0,
+        cdf_margin_init=0.0,
+        learnable_cdf_alpha=True,
+        learnable_cdf_epsilon=True,
+        learnable_cdf_rho_floor=False,
+        learnable_cdf_margin=False,
+        cdf_valid_point_abs_max=50.0,
+        cdf_padding_value=99.0,
+        gh_loss_weight=0.0,
+        enable_timing_debug=False,
+        timing_sync_cuda=True,
         ablation="full",
     ):
         super().__init__()
+        TimingMixin._init_timing(self, enable_timing_debug=enable_timing_debug, timing_sync_cuda=timing_sync_cuda)
 
         self.ablation = ablation
         self.use_dual_branch = ablation != "no_dual"
         self.use_safety_layer = ablation != "no_safety"
+        self.use_learned_cdf_constraints = bool(use_learned_cdf_constraints)
+        self.gh_loss_weight = float(gh_loss_weight)
+        self._last_G_cdf_pred = None
+        self._last_h_cdf_pred = None
 
         if self.use_dual_branch:
             # 原始双分支：点云单独编码，状态单独编码
@@ -786,6 +1005,32 @@ class UNet(nn.Module):
             nn.Tanh()
         )
 
+        if self.use_learned_cdf_constraints and self.use_safety_layer:
+            self.cdf_constraint_layer = DifferentiableLocalSdfCdfConstraintLayer(
+                l_k=cdf_l_k,
+                r_ego=cdf_r_ego,
+                sense_range=cdf_sense_range,
+                alpha_init=cdf_alpha_init,
+                alpha_min=cdf_alpha_min,
+                alpha_max=cdf_alpha_max,
+                epsilon_init=cdf_epsilon_init,
+                epsilon_min=cdf_epsilon_min,
+                epsilon_max=cdf_epsilon_max,
+                rho_floor_init=cdf_rho_floor_init,
+                margin_init=cdf_margin_init,
+                learnable_alpha=learnable_cdf_alpha,
+                learnable_epsilon=learnable_cdf_epsilon,
+                learnable_rho_floor=learnable_cdf_rho_floor,
+                learnable_margin=learnable_cdf_margin,
+                valid_point_abs_max=cdf_valid_point_abs_max,
+                padding_value=cdf_padding_value,
+                gh_reg_weight=gh_loss_weight,
+                enable_timing_debug=enable_timing_debug,
+                timing_sync_cuda=timing_sync_cuda,
+            )
+        else:
+            self.cdf_constraint_layer = None
+
         if self.use_safety_layer:
             self.safety_layer = DifferentiableSdfCdfSafetyLayer6D(
                 lambda_smooth=lambda_smooth,
@@ -805,21 +1050,20 @@ class UNet(nn.Module):
                 qp_invalid_h_eps=qp_invalid_h_eps,
                 qp_invalid_constraint_mode=qp_invalid_constraint_mode,
                 qp_invalid_debug_max_print=qp_invalid_debug_max_print,
-                qp_sanitize_redundant_constraints=qp_sanitize_redundant_constraints,
-                qp_redundant_constraint_h=qp_redundant_constraint_h,
-                qp_verify_solution=qp_verify_solution,
-                qp_solution_violation_tol=qp_solution_violation_tol,
-                qp_solution_debug_max_print=qp_solution_debug_max_print,
-                qp_suppress_qpth_warnings=qp_suppress_qpth_warnings,
                 learnable_lambda_smooth=learnable_lambda_smooth,
                 lambda_smooth_min=lambda_smooth_min,
                 lambda_smooth_max=lambda_smooth_max,
                 lambda_reg_weight=lambda_reg_weight,
+                enable_timing_debug=enable_timing_debug,
+                timing_sync_cuda=timing_sync_cuda,
             )
         else:
             self.safety_layer = None
 
     def forward(self, state, points, G_cdf, h_cdf):
+        device = state.device
+        t_total = self._timing_now(device=device)
+        t0 = self._timing_now(device=device)
         if self.use_dual_branch:
             geo_feat = self.geo_encoder(points)
             state_feat = self.state_encoder(state)
@@ -844,12 +1088,49 @@ class UNet(nn.Module):
             fused = self.fusion(geo_feat)
 
         u_nom = self.head(fused) * 1.2
+        self._timing_add("model/network_forward", t0, device=device)
 
         if self.use_safety_layer:
-            u_safe = self.safety_layer(u_nom, G_cdf, h_cdf)
+            if self.use_learned_cdf_constraints:
+                t0 = self._timing_now(device=device)
+                G_used, h_used = self.cdf_constraint_layer(state, points, u_nom)
+                self._timing_add("model/cdf_constraints", t0, device=device)
+                self._last_G_cdf_pred = G_used
+                self._last_h_cdf_pred = h_used
+            else:
+                G_used, h_used = G_cdf, h_cdf
+                self._last_G_cdf_pred = None
+                self._last_h_cdf_pred = None
+            t0 = self._timing_now(device=device)
+            u_safe = self.safety_layer(u_nom, G_used, h_used)
+            self._timing_add("model/safety_layer", t0, device=device)
         else:
             # w/o safety layer：网络直接输出动作
             u_safe = u_nom
+            self._last_G_cdf_pred = None
+            self._last_h_cdf_pred = None
+
+        self._timing_add("model/total_forward", t_total, device=device)
 
         # 保持 trainer 接口不变
         return u_safe, u_nom
+
+    def reset_timing_stats(self):
+        TimingMixin.reset_timing_stats(self)
+        if self.cdf_constraint_layer is not None and hasattr(self.cdf_constraint_layer, "reset_timing_stats"):
+            self.cdf_constraint_layer.reset_timing_stats()
+        if self.safety_layer is not None and hasattr(self.safety_layer, "reset_timing_stats"):
+            self.safety_layer.reset_timing_stats()
+
+    def get_timing_report(self):
+        report = TimingMixin.get_timing_report(self, prefix="")
+        if self.cdf_constraint_layer is not None and hasattr(self.cdf_constraint_layer, "get_timing_report"):
+            report.update(self.cdf_constraint_layer.get_timing_report(prefix=""))
+        if self.safety_layer is not None and hasattr(self.safety_layer, "get_timing_report"):
+            report.update(self.safety_layer.get_timing_report(prefix=""))
+        return report
+
+    def cdf_parameter_dict(self):
+        if self.cdf_constraint_layer is None:
+            return {}
+        return self.cdf_constraint_layer.get_param_dict()

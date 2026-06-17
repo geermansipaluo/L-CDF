@@ -1,13 +1,2 @@
-num_demos,demo_seed,train_seed,num_eval_episodes,test_target_seed,target_mode,fixed_target_x,fixed_target_y,runtime_qp_mode,graph_k,hidden_dim,lambda_smooth,learnable_lambda_smooth,qp_box,qp_normalize,arrival_count,success_count,collision_runs_count,collision_events,timeout_runs_count,arrival_rate,success_rate,collision_rate,avg_collision_events,model_path
-48,0,0,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-48,1,1,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-48,2,2,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-32,0,0,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-32,1,1,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-32,2,2,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-16,0,0,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-16,1,1,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-16,2,2,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-8,0,0,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt
-
-
+num_demos,demo_seed,train_seed,num_eval_episodes,test_target_seed,target_mode,fixed_target_x,fixed_target_y,runtime_qp_mode,graph_k,hidden_dim,lambda_smooth,learnable_lambda_smooth,use_learned_cdf_constraints,cdf_alpha,cdf_epsilon,qp_box,qp_normalize,arrival_count,success_count,collision_runs_count,collision_events,timeout_runs_count,arrival_rate,success_rate,collision_rate,avg_collision_events,model_path
+48,0,0,10,2026,fixed,15.0,-1.0,qpth,5,256,25.0,True,True,0.2507917582988739,0.10023830085992813,True,False,10,10,0,0,0,1.0,1.0,0.0,0.0,/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/learnable/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt

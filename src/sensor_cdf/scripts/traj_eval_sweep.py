@@ -142,7 +142,7 @@ class ParametricEllipseTracker:
         self.nominal_speed = float(rospy.get_param("~nominal_speed", 1.2))
 
         # runtime_qp_mode:
-        #   qpth    : 网络 head 输出 u_nom，再调用 model.safety_layer 做 PyTorch safety 投影；用于评估当前可微安全层本身
+        #   qpth    : 完整评估当前模型内部 learned PyTorch CDF-G/h + qpth safety layer
         #   jax     : 网络 head 输出 u_nom，再调用 JAX/ProxQP 输出最终 u_safe；用于稳定部署对照
         #   nominal : 只执行网络 head 输出，不做安全投影；用于 no_safety/BC 对照
         self.runtime_qp_mode = str(rospy.get_param("~runtime_qp_mode", "jax")).lower()
@@ -176,9 +176,32 @@ class ParametricEllipseTracker:
         # checkpoint 如果包含 lambda_raw/lambda_prior，会在 load_model() 中自动强制打开。
         self.learnable_lambda_smooth = ros_bool(rospy.get_param("~learnable_lambda_smooth", False), False)
         self.lambda_smooth_min = float(rospy.get_param("~lambda_smooth_min", 0.1))
-        self.lambda_smooth_max = float(rospy.get_param("~lambda_smooth_max", 80.0))
+        self.lambda_smooth_max = float(rospy.get_param("~lambda_smooth_max", 50.0))
         self.lambda_reg_weight = float(rospy.get_param("~lambda_reg_weight", 1e-4))
         self.qpth_fail_fallback_to_jax = ros_bool(rospy.get_param("~qpth_fail_fallback_to_jax", True), True)
+
+        # ============================================================
+        # 2.1 端到端 PyTorch CDF-G/h 构造参数：与 learnable 训练版本对齐
+        # ============================================================
+        self.use_learned_cdf_constraints = ros_bool(rospy.get_param("~use_learned_cdf_constraints", True), True)
+        self.cdf_l_k = float(rospy.get_param("~cdf_l_k", 0.33))
+        self.cdf_r_ego = float(rospy.get_param("~cdf_r_ego", 0.31))
+        self.cdf_sense_range = float(rospy.get_param("~cdf_sense_range", 3.0))
+        self.cdf_alpha_init = float(rospy.get_param("~cdf_alpha_init", 0.25))
+        self.cdf_alpha_min = float(rospy.get_param("~cdf_alpha_min", 0.10))
+        self.cdf_alpha_max = float(rospy.get_param("~cdf_alpha_max", 0.55))
+        self.learnable_cdf_alpha = ros_bool(rospy.get_param("~learnable_cdf_alpha", True), True)
+        self.cdf_epsilon_init = float(rospy.get_param("~cdf_epsilon_init", 0.1))
+        self.cdf_epsilon_min = float(rospy.get_param("~cdf_epsilon_min", 0.05))
+        self.cdf_epsilon_max = float(rospy.get_param("~cdf_epsilon_max", 0.20))
+        self.learnable_cdf_epsilon = ros_bool(rospy.get_param("~learnable_cdf_epsilon", True), True)
+        self.cdf_rho_floor_init = float(rospy.get_param("~cdf_rho_floor_init", 0.0))
+        self.learnable_cdf_rho_floor = ros_bool(rospy.get_param("~learnable_cdf_rho_floor", False), False)
+        self.cdf_margin_init = float(rospy.get_param("~cdf_margin_init", 0.0))
+        self.learnable_cdf_margin = ros_bool(rospy.get_param("~learnable_cdf_margin", False), False)
+        self.cdf_valid_point_abs_max = float(rospy.get_param("~cdf_valid_point_abs_max", 50.0))
+        self.cdf_padding_value = float(rospy.get_param("~cdf_padding_value", 99.0))
+        self.lambda_gh = float(rospy.get_param("~lambda_gh", 0.001))
 
         os.makedirs(self.trajectory_save_dir, exist_ok=True)
 
@@ -368,6 +391,27 @@ class ParametricEllipseTracker:
             "lambda_smooth_min": self.lambda_smooth_min,
             "lambda_smooth_max": self.lambda_smooth_max,
             "lambda_reg_weight": self.lambda_reg_weight,
+            "use_learned_cdf_constraints": self.use_learned_cdf_constraints,
+            "cdf_l_k": self.cdf_l_k,
+            "cdf_r_ego": self.cdf_r_ego,
+            "cdf_sense_range": self.cdf_sense_range,
+            "cdf_alpha_init": self.cdf_alpha_init,
+            "cdf_alpha_min": self.cdf_alpha_min,
+            "cdf_alpha_max": self.cdf_alpha_max,
+            "cdf_epsilon_init": self.cdf_epsilon_init,
+            "cdf_epsilon_min": self.cdf_epsilon_min,
+            "cdf_epsilon_max": self.cdf_epsilon_max,
+            "cdf_rho_floor_init": self.cdf_rho_floor_init,
+            "cdf_margin_init": self.cdf_margin_init,
+            "learnable_cdf_alpha": self.learnable_cdf_alpha,
+            "learnable_cdf_epsilon": self.learnable_cdf_epsilon,
+            "learnable_cdf_rho_floor": self.learnable_cdf_rho_floor,
+            "learnable_cdf_margin": self.learnable_cdf_margin,
+            "cdf_valid_point_abs_max": self.cdf_valid_point_abs_max,
+            "cdf_padding_value": self.cdf_padding_value,
+            "gh_loss_weight": self.lambda_gh,
+            "enable_timing_debug": False,
+            "timing_sync_cuda": False,
             "ablation": self.model_ablation,
         }
         signature = inspect.signature(UNet.__init__)
@@ -385,6 +429,14 @@ class ParametricEllipseTracker:
                 "safety_layer.lambda_raw" in state_dict
                 or "safety_layer.lambda_prior" in state_dict
             )
+            ckpt_has_learned_cdf = any(str(k).startswith("cdf_constraint_layer.") for k in state_dict.keys())
+
+            if ckpt_has_learned_cdf and not self.use_learned_cdf_constraints:
+                rospy.logwarn(
+                    "checkpoint 包含 cdf_constraint_layer.*，"
+                    "自动强制 use_learned_cdf_constraints=True 以匹配模型结构。"
+                )
+                self.use_learned_cdf_constraints = True
 
             if ckpt_has_learnable_lambda and not self.learnable_lambda_smooth:
                 rospy.logwarn(
@@ -406,8 +458,8 @@ class ParametricEllipseTracker:
                 model.load_state_dict(state_dict, strict=True)
             except RuntimeError as strict_e:
                 rospy.logerr("strict=True 加载失败：通常是测试端 model.py 与训练端 model.py 不一致。")
-                rospy.logerr(f"ckpt_has_learnable_lambda={ckpt_has_learnable_lambda}")
-                rospy.logerr(f"runtime_learnable_lambda_smooth={self.learnable_lambda_smooth}")
+                rospy.logerr(f"ckpt_has_learnable_lambda={ckpt_has_learnable_lambda}, ckpt_has_learned_cdf={ckpt_has_learned_cdf}")
+                rospy.logerr(f"runtime_learnable_lambda_smooth={self.learnable_lambda_smooth}, use_learned_cdf={self.use_learned_cdf_constraints}")
                 rospy.logerr(f"model_kwargs={model_kwargs}")
                 raise strict_e
 
@@ -420,10 +472,18 @@ class ParametricEllipseTracker:
             except Exception:
                 pass
 
+            cdf_info = {}
+            try:
+                if hasattr(model, "cdf_parameter_dict"):
+                    cdf_info = model.cdf_parameter_dict()
+            except Exception:
+                cdf_info = {}
+
             rospy.loginfo(
                 f"模型装载成功: {model_path}; mode={self.runtime_qp_mode}; "
                 f"graph_k={self.model_graph_k}; hidden={self.model_hidden_dim}; "
                 f"lambda={float(lambda_info):.4f}; learnable_lambda={self.learnable_lambda_smooth}; "
+                f"use_learned_cdf={self.use_learned_cdf_constraints}; cdf={cdf_info}; "
                 f"box={self.use_qp_box_constraints}; normalize={self.qp_normalize_constraints}"
             )
             return model
@@ -479,6 +539,22 @@ class ParametricEllipseTracker:
                     out = out[0]
                 return out
             return u_nom_tensor
+
+    def run_model_learned_cdf_qpth(self, state_tensor, points_batch):
+        # model.forward 内部会根据点云和 u_nom 重新构造 PyTorch CDF-G/h；
+        # dummy G/h 只是兼容 forward 签名，use_learned_cdf_constraints=True 时不会被用作 QP 主约束。
+        dummy_G = torch.zeros((1, 1, 6), dtype=torch.float32, device=self.device)
+        dummy_h = torch.zeros((1, 1), dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            out = self.model(state_tensor, points_batch, dummy_G, dummy_h)
+            if isinstance(out, (tuple, list)):
+                u_safe_tensor, u_nom_tensor = out[0], out[1]
+            else:
+                u_safe_tensor = out
+                u_nom_tensor = None
+        u_safe_np = u_safe_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+        u_nom_np = None if u_nom_tensor is None else u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+        return u_safe_np, u_nom_np
 
     def set_gazebo_model_pose(self, model_name, x, y, z=0.25):
         if self.set_model_state_srv is None:
@@ -705,46 +781,65 @@ class ParametricEllipseTracker:
             local_pts = self.pointcloud_local.astype(np.float32)
             points_batch = self.make_points_batch(local_pts)
 
-            # 1) 网络 head 先输出 u_nom=[v,L*omega]。
-            u_nom_tensor = self.predict_model_unom(state_tensor, points_batch)
-            u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
-            u_nom_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
-            u_nom_tensor = torch.tensor(u_nom_np, dtype=torch.float32).unsqueeze(0).to(self.device)
-
-            # 2) 使用网络 u_nom 重新计算当前帧 SDF-CDF-QP 的 G/h。
-            fixed_size = 200
-            if local_pts.shape[0] > fixed_size:
-                local_pts_for_qp = local_pts[:fixed_size]
-            elif local_pts.shape[0] < fixed_size:
-                pad_box = np.full((fixed_size - local_pts.shape[0], 2), 99.0, dtype=np.float32)
-                local_pts_for_qp = np.vstack([local_pts, pad_box]).astype(np.float32)
-            else:
-                local_pts_for_qp = local_pts
-
-            ego_p_local_jax = np.array([l_k, 0.0], dtype=np.float32)
-            sol_6d_raw, G_extracted, h_extracted = self.local_expert.solve_agent_qp_local(
-                ego_p_local_jax,
-                u_nom_np,
-                local_pts_for_qp,
-                target_local_np,
-            )
+            u_nom_np = None
+            u_jax_np = None
 
             if self.runtime_qp_mode == "nominal":
-                u_safe_np = u_nom_np
+                u_nom_tensor = self.predict_model_unom(state_tensor, points_batch)
+                u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+                u_safe_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
+
             elif self.runtime_qp_mode == "jax":
-                u_safe_np = np.array(sol_6d_raw[:2], dtype=np.float32)
+                # 对照模式：网络 nominal + JAX/ProxQP 安全投影。
+                u_nom_tensor = self.predict_model_unom(state_tensor, points_batch)
+                u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+                u_nom_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
+
+                fixed_size = 200
+                if local_pts.shape[0] > fixed_size:
+                    local_pts_for_qp = local_pts[:fixed_size]
+                elif local_pts.shape[0] < fixed_size:
+                    pad_box = np.full((fixed_size - local_pts.shape[0], 2), 99.0, dtype=np.float32)
+                    local_pts_for_qp = np.vstack([local_pts, pad_box]).astype(np.float32)
+                else:
+                    local_pts_for_qp = local_pts
+
+                ego_p_local_jax = np.array([l_k, 0.0], dtype=np.float32)
+                sol_6d_raw, _, _ = self.local_expert.solve_agent_qp_local(
+                    ego_p_local_jax,
+                    u_nom_np,
+                    local_pts_for_qp,
+                    target_local_np,
+                )
+                u_jax_np = np.array(sol_6d_raw[:2], dtype=np.float32)
+                u_safe_np = u_jax_np
+
             else:
-                # 3) 正式评估当前可微安全层：不要再走 model.forward，直接调用 safety_layer。
-                G_cdf_tensor = torch.tensor(G_extracted, dtype=torch.float32).unsqueeze(0).to(self.device)
-                h_cdf_tensor = torch.tensor(h_extracted, dtype=torch.float32).unsqueeze(0).to(self.device)
+                # 正式评估当前 learnable CDF-QP：模型内部根据实时点云 + 学习到的参数构造 G/h。
                 try:
-                    u_safe_pred = self.apply_model_safety_layer(u_nom_tensor, G_cdf_tensor, h_cdf_tensor)
-                    u_safe_np = u_safe_pred.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+                    u_safe_np, u_nom_np = self.run_model_learned_cdf_qpth(state_tensor, points_batch)
+                    u_safe_np = np.clip(u_safe_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
                 except Exception as e:
-                    rospy.logerr(f"qpth safety_layer 推理失败: {e}")
+                    rospy.logerr(f"learned PyTorch CDF-QP 推理失败: {e}")
                     if self.qpth_fail_fallback_to_jax:
                         rospy.logwarn("已回退到 JAX/ProxQP 安全投影输出，避免当前 episode 中断。")
-                        u_safe_np = np.array(sol_6d_raw[:2], dtype=np.float32)
+                        u_nom_tensor = self.predict_model_unom(state_tensor, points_batch)
+                        u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
+                        u_nom_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
+                        fixed_size = 200
+                        if local_pts.shape[0] > fixed_size:
+                            local_pts_for_qp = local_pts[:fixed_size]
+                        elif local_pts.shape[0] < fixed_size:
+                            pad_box = np.full((fixed_size - local_pts.shape[0], 2), 99.0, dtype=np.float32)
+                            local_pts_for_qp = np.vstack([local_pts, pad_box]).astype(np.float32)
+                        else:
+                            local_pts_for_qp = local_pts
+                        ego_p_local_jax = np.array([l_k, 0.0], dtype=np.float32)
+                        sol_6d_raw, _, _ = self.local_expert.solve_agent_qp_local(
+                            ego_p_local_jax, u_nom_np, local_pts_for_qp, target_local_np
+                        )
+                        u_jax_np = np.array(sol_6d_raw[:2], dtype=np.float32)
+                        u_safe_np = u_jax_np
                     else:
                         u_safe_np = np.zeros(2, dtype=np.float32)
 
@@ -921,6 +1016,9 @@ class ParametricEllipseTracker:
             "hidden_dim": self.model_hidden_dim,
             "lambda_smooth": self.model_lambda_smooth,
             "learnable_lambda_smooth": self.learnable_lambda_smooth,
+            "use_learned_cdf_constraints": self.use_learned_cdf_constraints,
+            "cdf_alpha": getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_alpha", None).detach().cpu().item() if getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_alpha", None) is not None else None,
+            "cdf_epsilon": getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_epsilon", None).detach().cpu().item() if getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_epsilon", None) is not None else None,
             "qp_box": self.use_qp_box_constraints,
             "qp_normalize": self.qp_normalize_constraints,
             "arrival_count": self.reached_goals_count,

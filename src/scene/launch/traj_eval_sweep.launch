@@ -3,12 +3,12 @@
     <!-- DensityNet 批量评测专用 launch：对齐当前新版 UNet + qpth safety layer 结构 -->
 
     <!-- 文件路径与实验标签 -->
-    <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt" />
+    <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/learnable/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt" />
     <arg name="output_csv" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv" />
     <arg name="trajectory_save_dir" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories" />
-    <arg name="num_demos" default="8" />
-    <arg name="demo_seed" default="1" />
-    <arg name="train_seed" default="1" />
+    <arg name="num_demos" default="48" />
+    <arg name="demo_seed" default="0" />
+    <arg name="train_seed" default="0" />
 
     <!-- 评测目标设置：默认专门测试 y=0 终点 -->
     <!-- target_mode 可选: fixed_y0 / fixed / random_y0 / random -->
@@ -69,6 +69,27 @@
     <arg name="lambda_smooth_min" default="1" />
     <arg name="lambda_smooth_max" default="50.0" />
     <arg name="lambda_reg_weight" default="0.0001" />
+
+    <!-- learnable CDF-G/h 参数：与训练端 argument.py 对齐 -->
+    <arg name="use_learned_cdf_constraints" default="true" />
+    <arg name="cdf_l_k" default="0.33" />
+    <arg name="cdf_r_ego" default="0.31" />
+    <arg name="cdf_sense_range" default="3.0" />
+    <arg name="cdf_alpha_init" default="0.25" />
+    <arg name="cdf_alpha_min" default="0.10" />
+    <arg name="cdf_alpha_max" default="0.55" />
+    <arg name="learnable_cdf_alpha" default="true" />
+    <arg name="cdf_epsilon_init" default="0.1" />
+    <arg name="cdf_epsilon_min" default="0.05" />
+    <arg name="cdf_epsilon_max" default="0.20" />
+    <arg name="learnable_cdf_epsilon" default="true" />
+    <arg name="cdf_rho_floor_init" default="0.0" />
+    <arg name="learnable_cdf_rho_floor" default="false" />
+    <arg name="cdf_margin_init" default="0.0" />
+    <arg name="learnable_cdf_margin" default="false" />
+    <arg name="cdf_valid_point_abs_max" default="50.0" />
+    <arg name="cdf_padding_value" default="99.0" />
+    <arg name="lambda_gh" default="0.001" />
 
     <arg name="use_rviz" default="true" />
 
@@ -152,6 +173,26 @@
         <param name="lambda_smooth_min" type="double" value="$(arg lambda_smooth_min)" />
         <param name="lambda_smooth_max" type="double" value="$(arg lambda_smooth_max)" />
         <param name="lambda_reg_weight" type="double" value="$(arg lambda_reg_weight)" />
+
+        <param name="use_learned_cdf_constraints" type="bool" value="$(arg use_learned_cdf_constraints)" />
+        <param name="cdf_l_k" type="double" value="$(arg cdf_l_k)" />
+        <param name="cdf_r_ego" type="double" value="$(arg cdf_r_ego)" />
+        <param name="cdf_sense_range" type="double" value="$(arg cdf_sense_range)" />
+        <param name="cdf_alpha_init" type="double" value="$(arg cdf_alpha_init)" />
+        <param name="cdf_alpha_min" type="double" value="$(arg cdf_alpha_min)" />
+        <param name="cdf_alpha_max" type="double" value="$(arg cdf_alpha_max)" />
+        <param name="learnable_cdf_alpha" type="bool" value="$(arg learnable_cdf_alpha)" />
+        <param name="cdf_epsilon_init" type="double" value="$(arg cdf_epsilon_init)" />
+        <param name="cdf_epsilon_min" type="double" value="$(arg cdf_epsilon_min)" />
+        <param name="cdf_epsilon_max" type="double" value="$(arg cdf_epsilon_max)" />
+        <param name="learnable_cdf_epsilon" type="bool" value="$(arg learnable_cdf_epsilon)" />
+        <param name="cdf_rho_floor_init" type="double" value="$(arg cdf_rho_floor_init)" />
+        <param name="learnable_cdf_rho_floor" type="bool" value="$(arg learnable_cdf_rho_floor)" />
+        <param name="cdf_margin_init" type="double" value="$(arg cdf_margin_init)" />
+        <param name="learnable_cdf_margin" type="bool" value="$(arg learnable_cdf_margin)" />
+        <param name="cdf_valid_point_abs_max" type="double" value="$(arg cdf_valid_point_abs_max)" />
+        <param name="cdf_padding_value" type="double" value="$(arg cdf_padding_value)" />
+        <param name="lambda_gh" type="double" value="$(arg lambda_gh)" />
     </node>
 
     <node name="update_state" pkg="sensor_cdf" type="update_state.py" />

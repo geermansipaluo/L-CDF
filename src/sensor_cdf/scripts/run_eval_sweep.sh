@@ -18,8 +18,8 @@ LAUNCH_PKG="${LAUNCH_PKG:-scene}"
 LAUNCH_FILE="${LAUNCH_FILE:-traj_eval_sweep.launch}"
 
 # 当前新 loss 模型默认目录；也可运行前覆盖：
-#   MODEL_ROOT=/path/to/saved_models/new_loss bash run_eval_sweep.sh
-MODEL_ROOT="${MODEL_ROOT:-/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss}"
+#   MODEL_ROOT=/path/to/saved_models/learnable bash run_eval_sweep.sh
+MODEL_ROOT="${MODEL_ROOT:-/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/learnable}"
 ALT_MODEL_ROOT="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models"
 
 if [[ ! -d "${MODEL_ROOT}" && -d "${ALT_MODEL_ROOT}" ]]; then
@@ -85,10 +85,31 @@ QP_SUPPRESS_QPTH_WARNINGS="${QP_SUPPRESS_QPTH_WARNINGS:-true}"
 QPTH_FAIL_FALLBACK_TO_JAX="${QPTH_FAIL_FALLBACK_TO_JAX:-true}"
 
 # checkpoint 中如果含 lambda_raw/lambda_prior，评测节点会自动强制 true；这里默认 false 更兼容旧模型
-LEARNABLE_LAMBDA_SMOOTH="${LEARNABLE_LAMBDA_SMOOTH:-false}"
-LAMBDA_SMOOTH_MIN="${LAMBDA_SMOOTH_MIN:-0.1}"
-LAMBDA_SMOOTH_MAX="${LAMBDA_SMOOTH_MAX:-80.0}"
+LEARNABLE_LAMBDA_SMOOTH="${LEARNABLE_LAMBDA_SMOOTH:-true}"
+LAMBDA_SMOOTH_MIN="${LAMBDA_SMOOTH_MIN:-1}"
+LAMBDA_SMOOTH_MAX="${LAMBDA_SMOOTH_MAX:-50.0}"
 LAMBDA_REG_WEIGHT="${LAMBDA_REG_WEIGHT:-0.0001}"
+
+# learnable CDF-G/h 参数：必须和训练端 argument.py 对齐
+USE_LEARNED_CDF_CONSTRAINTS="${USE_LEARNED_CDF_CONSTRAINTS:-true}"
+CDF_L_K="${CDF_L_K:-0.33}"
+CDF_R_EGO="${CDF_R_EGO:-0.31}"
+CDF_SENSE_RANGE="${CDF_SENSE_RANGE:-3.0}"
+CDF_ALPHA_INIT="${CDF_ALPHA_INIT:-0.25}"
+CDF_ALPHA_MIN="${CDF_ALPHA_MIN:-0.10}"
+CDF_ALPHA_MAX="${CDF_ALPHA_MAX:-0.55}"
+LEARNABLE_CDF_ALPHA="${LEARNABLE_CDF_ALPHA:-true}"
+CDF_EPSILON_INIT="${CDF_EPSILON_INIT:-0.1}"
+CDF_EPSILON_MIN="${CDF_EPSILON_MIN:-0.05}"
+CDF_EPSILON_MAX="${CDF_EPSILON_MAX:-0.20}"
+LEARNABLE_CDF_EPSILON="${LEARNABLE_CDF_EPSILON:-true}"
+CDF_RHO_FLOOR_INIT="${CDF_RHO_FLOOR_INIT:-0.0}"
+LEARNABLE_CDF_RHO_FLOOR="${LEARNABLE_CDF_RHO_FLOOR:-false}"
+CDF_MARGIN_INIT="${CDF_MARGIN_INIT:-0.0}"
+LEARNABLE_CDF_MARGIN="${LEARNABLE_CDF_MARGIN:-false}"
+CDF_VALID_POINT_ABS_MAX="${CDF_VALID_POINT_ABS_MAX:-50.0}"
+CDF_PADDING_VALUE="${CDF_PADDING_VALUE:-99.0}"
+LAMBDA_GH="${LAMBDA_GH:-0.001}"
 
 # 默认评估完整 5 个 demo 数量 × 3 个 dataset seed × 3 个 train seed = 45 个模型。
 # 想少跑可以覆盖，例如：
@@ -128,6 +149,7 @@ FIXED_TARGET            = (${FIXED_TARGET_X}, ${FIXED_TARGET_Y})
 RUNTIME_QP_MODE         = ${RUNTIME_QP_MODE}
 GRAPH_K/HIDDEN/LAMBDA   = ${GRAPH_K}/${HIDDEN_DIM}/${LAMBDA_SMOOTH}
 QP box/normalize/fail   = ${USE_QP_BOX_CONSTRAINTS}/${QP_NORMALIZE_CONSTRAINTS}/${QP_FAIL_MODE}
+LEARNED_CDF             = ${USE_LEARNED_CDF_CONSTRAINTS}, alpha=[${CDF_ALPHA_MIN},${CDF_ALPHA_INIT},${CDF_ALPHA_MAX}], eps=[${CDF_EPSILON_MIN},${CDF_EPSILON_INIT},${CDF_EPSILON_MAX}]
 ============================================================
 EOF2
 
@@ -202,6 +224,25 @@ for N in "${DEMO_LIST[@]}"; do
         lambda_smooth_min:="${LAMBDA_SMOOTH_MIN}" \
         lambda_smooth_max:="${LAMBDA_SMOOTH_MAX}" \
         lambda_reg_weight:="${LAMBDA_REG_WEIGHT}" \
+        use_learned_cdf_constraints:="${USE_LEARNED_CDF_CONSTRAINTS}" \
+        cdf_l_k:="${CDF_L_K}" \
+        cdf_r_ego:="${CDF_R_EGO}" \
+        cdf_sense_range:="${CDF_SENSE_RANGE}" \
+        cdf_alpha_init:="${CDF_ALPHA_INIT}" \
+        cdf_alpha_min:="${CDF_ALPHA_MIN}" \
+        cdf_alpha_max:="${CDF_ALPHA_MAX}" \
+        learnable_cdf_alpha:="${LEARNABLE_CDF_ALPHA}" \
+        cdf_epsilon_init:="${CDF_EPSILON_INIT}" \
+        cdf_epsilon_min:="${CDF_EPSILON_MIN}" \
+        cdf_epsilon_max:="${CDF_EPSILON_MAX}" \
+        learnable_cdf_epsilon:="${LEARNABLE_CDF_EPSILON}" \
+        cdf_rho_floor_init:="${CDF_RHO_FLOOR_INIT}" \
+        learnable_cdf_rho_floor:="${LEARNABLE_CDF_RHO_FLOOR}" \
+        cdf_margin_init:="${CDF_MARGIN_INIT}" \
+        learnable_cdf_margin:="${LEARNABLE_CDF_MARGIN}" \
+        cdf_valid_point_abs_max:="${CDF_VALID_POINT_ABS_MAX}" \
+        cdf_padding_value:="${CDF_PADDING_VALUE}" \
+        lambda_gh:="${LAMBDA_GH}" \
         use_rviz:="${USE_RVIZ}"
 
       RET=$?
