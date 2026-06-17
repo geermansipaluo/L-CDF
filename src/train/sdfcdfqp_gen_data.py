@@ -590,7 +590,7 @@ if __name__ == '__main__':
     # 2) residual > 0.1 判定为关键帧，关键帧全部保存；
     # 3) 非关键帧按 50% 概率保存，用于降低简单帧冗余。
     KEYFRAME_RESIDUAL_THRESHOLD = 0.1
-    NON_KEYFRAME_KEEP_PROB = 1
+    NON_KEYFRAME_KEEP_PROB = 0.5
 
     # 每个环境生成多少条目标轨迹：保持 6 条不变。
     # 第一阶段修复：每个环境强制包含 1 条终点 y=0 的直线目标轨迹，
@@ -607,7 +607,8 @@ if __name__ == '__main__':
     rng = np.random.default_rng(0)
 
     # 输出数据集名字保持不变
-    output_dataset_path = "dataset_trajectories.pt"
+    numrays=32
+    output_dataset_path = f"dataset_trajectories_{numrays}.pt"
 
     control_planner = GlobalMapCDFPlanner()
     sdf_label_planner = LocalSdfCdfLabelPlanner()
@@ -717,7 +718,7 @@ if __name__ == '__main__':
                     theta,
                     all_C,
                     all_d,
-                    num_rays=64,
+                    num_rays=numrays,
                     max_range=3.0,
                 )
 

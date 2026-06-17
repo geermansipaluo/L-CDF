@@ -76,7 +76,7 @@ def get_env_pool():
     env_pool.append({
         'target': np.array([13.0, 0.8]),
         'meta_obstacles': [
-            {'type': 'rect', 'center': np.array([6.5, 0.0]), 'a': 0.8, 'b': 0.8}, # 正前1.6x1.6m巨大方块
+            {'type': 'rect', 'center': np.array([6.5, 0.0]), 'a': 0.6, 'b': 0.6}, # 正前1.6x1.6m巨大方块
             {'type': 'circle', 'center': np.array([10.0, 1.2]), 'r': 0.3}
         ]
     })

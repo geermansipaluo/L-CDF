@@ -26,7 +26,7 @@ def smooth_bump(c, b):
 def get_local_sdf_rho_and_psi(pos_p_local, target_local, local_pc):
     """ 完全解耦大地图，只凭车体系下的离散点云 pos 求解全局单行 CDF 屏障 """
     r_ego = 0.31 + 0.25
-    sense_range = 3.0  # 3.0m 的局部感应圆环外边际
+    sense_range = 2.5  # 3.0m 的局部感应圆环外边际
     
     num_pts = local_pc.shape[0]
     
@@ -42,7 +42,7 @@ def get_local_sdf_rho_and_psi(pos_p_local, target_local, local_pc):
     
     # 局部引力场：前瞻点到局部目标的平方距离
     V_x = jnp.sum((pos_p_local - target_local)**2)
-    alpha = 0.5
+    alpha = 0.25
     
     rho = psi_curr / (V_x ** alpha + 1e-6)
     return rho, psi_curr
@@ -56,7 +56,7 @@ class LocalSdfCdfPlanner:
         """
         🟢【JAX 静态编译大核】：内部 100% 使用 jnp，杜绝任何物理内存和 Tracer 转换
         """
-        epsilon = 0.05
+        epsilon = 0.1
         inv_eps = 1.0 / epsilon
 
         def density_wrapper_local(p):

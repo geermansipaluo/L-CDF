@@ -1,27 +1,74 @@
 <?xml version="1.0"?>
-
 <launch>
-    <!-- DensityNet 批量评测专用 launch：已对齐当前最终版 traj_generate.py -->
+    <!-- DensityNet 批量评测专用 launch：对齐当前新版 UNet + qpth safety layer 结构 -->
 
-    <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt" />
+    <!-- 文件路径与实验标签 -->
+    <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/new_loss/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt" />
     <arg name="output_csv" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv" />
     <arg name="trajectory_save_dir" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories" />
+    <arg name="num_demos" default="8" />
+    <arg name="demo_seed" default="1" />
+    <arg name="train_seed" default="1" />
 
-    <arg name="num_demos" default="48" />
-    <arg name="demo_seed" default="0" />
-    <arg name="train_seed" default="0" />
-    <arg name="hold_before_episode" default="2.0" />
-
-    <arg name="num_eval_episodes" default="10" />
-    <arg name="test_target_seed" default="2026" />
-    <arg name="max_episode_time" default="80.0" />
-
+    <!-- 评测目标设置：默认专门测试 y=0 终点 -->
+    <!-- target_mode 可选: fixed_y0 / fixed / random_y0 / random -->
+    <arg name="target_mode" default="fixed" />
+    <arg name="fixed_target_x" default="15.0" />
+    <arg name="fixed_target_y" default="-1" />
     <arg name="target_x_min" default="14.0" />
     <arg name="target_x_max" default="16.0" />
-    <arg name="target_y_min" default="-1.0" />
-    <arg name="target_y_max" default="1.0" />
+    <arg name="target_y_min" default="-2.0" />
+    <arg name="target_y_max" default="2.0" />
+    <arg name="test_target_seed" default="2026" />
+
+    <!-- 评测流程 -->
+    <arg name="num_eval_episodes" default="10" />
+    <arg name="max_episode_time" default="80.0" />
+    <arg name="hold_before_episode" default="2.0" />
     <arg name="goal_radius" default="0.4" />
     <arg name="terminate_on_collision" default="false" />
+
+    <!-- 当前模型结构参数：必须和训练 main.py / model.py 保持一致 -->
+    <arg name="state_dim" default="4" />
+    <arg name="hidden_dim" default="256" />
+    <arg name="graph_k" default="5" />
+    <arg name="lambda_smooth" default="25.0" />
+    <arg name="qp_limit" default="1.2" />
+    <arg name="ablation" default="full" />
+    <arg name="nominal_speed" default="1.2" />
+
+    <!-- runtime_qp_mode: qpth=评估模型内部 safety_layer; jax=稳定 ProxQP 投影; nominal=只测 head -->
+    <arg name="runtime_qp_mode" default="qpth" />
+
+    <!-- qpth safety layer 数值参数：与新版 model.py 对齐 -->
+    <arg name="use_qp_box_constraints" default="true" />
+    <arg name="qp_jitter" default="0.0001" />
+    <arg name="qp_normalize_constraints" default="false" />
+    <arg name="qp_constraint_scale_floor" default="1.0" />
+    <arg name="qp_box_eps" default="0.0001" />
+    <arg name="qp_max_iter" default="100" />
+    <arg name="qp_eps" default="0.0001" />
+    <arg name="qp_not_improved_lim" default="20" />
+    <arg name="qp_fail_mode" default="fallback" />
+    <arg name="qp_debug_max_print" default="20" />
+    <arg name="qp_check_invalid_constraints" default="true" />
+    <arg name="qp_invalid_g_norm_eps" default="1e-8" />
+    <arg name="qp_invalid_h_eps" default="1e-6" />
+    <arg name="qp_invalid_constraint_mode" default="warn" />
+    <arg name="qp_invalid_debug_max_print" default="20" />
+    <arg name="qp_sanitize_redundant_constraints" default="true" />
+    <arg name="qp_redundant_constraint_h" default="1.0" />
+    <arg name="qp_verify_solution" default="true" />
+    <arg name="qp_solution_violation_tol" default="0.001" />
+    <arg name="qp_solution_debug_max_print" default="20" />
+    <arg name="qp_suppress_qpth_warnings" default="true" />
+    <arg name="qpth_fail_fallback_to_jax" default="true" />
+
+    <!-- 可学习 lambda：节点会根据 checkpoint 是否含 lambda_raw/lambda_prior 自动修正 -->
+    <arg name="learnable_lambda_smooth" default="true" />
+    <arg name="lambda_smooth_min" default="1" />
+    <arg name="lambda_smooth_max" default="50.0" />
+    <arg name="lambda_reg_weight" default="0.0001" />
 
     <arg name="use_rviz" default="true" />
 
@@ -50,35 +97,73 @@
         <param name="model_path" value="$(arg model_path)" />
         <param name="output_csv" value="$(arg output_csv)" />
         <param name="trajectory_save_dir" value="$(arg trajectory_save_dir)" />
-
         <param name="num_demos" type="int" value="$(arg num_demos)" />
         <param name="demo_seed" type="int" value="$(arg demo_seed)" />
         <param name="train_seed" type="int" value="$(arg train_seed)" />
-        <param name="hold_before_episode" type="double" value="$(arg hold_before_episode)" />
 
-        <param name="num_eval_episodes" type="int" value="$(arg num_eval_episodes)" />
-        <param name="test_target_seed" type="int" value="$(arg test_target_seed)" />
-        <param name="max_episode_time" type="double" value="$(arg max_episode_time)" />
-
+        <param name="target_mode" value="$(arg target_mode)" />
+        <param name="fixed_target_x" type="double" value="$(arg fixed_target_x)" />
+        <param name="fixed_target_y" type="double" value="$(arg fixed_target_y)" />
         <param name="target_x_min" type="double" value="$(arg target_x_min)" />
         <param name="target_x_max" type="double" value="$(arg target_x_max)" />
         <param name="target_y_min" type="double" value="$(arg target_y_min)" />
         <param name="target_y_max" type="double" value="$(arg target_y_max)" />
+        <param name="test_target_seed" type="int" value="$(arg test_target_seed)" />
+
+        <param name="num_eval_episodes" type="int" value="$(arg num_eval_episodes)" />
+        <param name="max_episode_time" type="double" value="$(arg max_episode_time)" />
+        <param name="hold_before_episode" type="double" value="$(arg hold_before_episode)" />
         <param name="goal_radius" type="double" value="$(arg goal_radius)" />
         <param name="terminate_on_collision" type="bool" value="$(arg terminate_on_collision)" />
+
+        <param name="state_dim" type="int" value="$(arg state_dim)" />
+        <param name="hidden_dim" type="int" value="$(arg hidden_dim)" />
+        <param name="graph_k" type="int" value="$(arg graph_k)" />
+        <param name="lambda_smooth" type="double" value="$(arg lambda_smooth)" />
+        <param name="qp_limit" type="double" value="$(arg qp_limit)" />
+        <param name="ablation" value="$(arg ablation)" />
+        <param name="nominal_speed" type="double" value="$(arg nominal_speed)" />
+        <param name="runtime_qp_mode" value="$(arg runtime_qp_mode)" />
+
+        <param name="use_qp_box_constraints" type="bool" value="$(arg use_qp_box_constraints)" />
+        <param name="qp_jitter" type="double" value="$(arg qp_jitter)" />
+        <param name="qp_normalize_constraints" type="bool" value="$(arg qp_normalize_constraints)" />
+        <param name="qp_constraint_scale_floor" type="double" value="$(arg qp_constraint_scale_floor)" />
+        <param name="qp_box_eps" type="double" value="$(arg qp_box_eps)" />
+        <param name="qp_max_iter" type="int" value="$(arg qp_max_iter)" />
+        <param name="qp_eps" type="double" value="$(arg qp_eps)" />
+        <param name="qp_not_improved_lim" type="int" value="$(arg qp_not_improved_lim)" />
+        <param name="qp_fail_mode" value="$(arg qp_fail_mode)" />
+        <param name="qp_debug_max_print" type="int" value="$(arg qp_debug_max_print)" />
+        <param name="qp_check_invalid_constraints" type="bool" value="$(arg qp_check_invalid_constraints)" />
+        <param name="qp_invalid_g_norm_eps" type="double" value="$(arg qp_invalid_g_norm_eps)" />
+        <param name="qp_invalid_h_eps" type="double" value="$(arg qp_invalid_h_eps)" />
+        <param name="qp_invalid_constraint_mode" value="$(arg qp_invalid_constraint_mode)" />
+        <param name="qp_invalid_debug_max_print" type="int" value="$(arg qp_invalid_debug_max_print)" />
+        <param name="qp_sanitize_redundant_constraints" type="bool" value="$(arg qp_sanitize_redundant_constraints)" />
+        <param name="qp_redundant_constraint_h" type="double" value="$(arg qp_redundant_constraint_h)" />
+        <param name="qp_verify_solution" type="bool" value="$(arg qp_verify_solution)" />
+        <param name="qp_solution_violation_tol" type="double" value="$(arg qp_solution_violation_tol)" />
+        <param name="qp_solution_debug_max_print" type="int" value="$(arg qp_solution_debug_max_print)" />
+        <param name="qp_suppress_qpth_warnings" type="bool" value="$(arg qp_suppress_qpth_warnings)" />
+        <param name="qpth_fail_fallback_to_jax" type="bool" value="$(arg qpth_fail_fallback_to_jax)" />
+
+        <param name="learnable_lambda_smooth" type="bool" value="$(arg learnable_lambda_smooth)" />
+        <param name="lambda_smooth_min" type="double" value="$(arg lambda_smooth_min)" />
+        <param name="lambda_smooth_max" type="double" value="$(arg lambda_smooth_max)" />
+        <param name="lambda_reg_weight" type="double" value="$(arg lambda_reg_weight)" />
     </node>
 
     <node name="update_state" pkg="sensor_cdf" type="update_state.py" />
     <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py" />
     <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py" />
 
-    <!-- 对齐数据生成和 HDL-32E samples=32：桥接器输出固定 32 根 2D 射线 -->
+    <!-- 对齐当前 3m 局部点云输入；评测代码内部会对 QP 分支补到 200 点 -->
     <node name="perfect_lidar_bridge" pkg="sensor_cdf" type="perfect_lidar_bridge.py" output="screen">
-        <param name="num_rays" type="int" value="64" />
-        <param name="max_range" type="double" value="3" />
+        <param name="num_rays" type="int" value="32" />
+        <param name="max_range" type="double" value="3.0" />
     </node>
 
     <node if="$(arg use_rviz)" name="rviz" pkg="rviz" type="rviz"
           args="-d $(find scene)/rviz_config/simulation.rviz" />
-
 </launch>
