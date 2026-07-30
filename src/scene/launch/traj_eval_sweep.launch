@@ -6,6 +6,10 @@
     <arg name="model_path" default="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/learnable/DensityNet-demo48-dseed0-seed0/model_best_parametric_bc.pt" />
     <arg name="output_csv" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv" />
     <arg name="trajectory_save_dir" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories" />
+    <arg name="experiment_version" default="v0.1.2" />
+    <!-- 留空时由节点自动生成 v版本_时间，避免重复运行互相覆盖 -->
+    <arg name="run_id" default="" />
+    <arg name="result_dir" default="" />
     <arg name="num_demos" default="48" />
     <arg name="demo_seed" default="0" />
     <arg name="train_seed" default="0" />
@@ -27,6 +31,21 @@
     <arg name="hold_before_episode" default="2.0" />
     <arg name="goal_radius" default="0.4" />
     <arg name="terminate_on_collision" default="false" />
+
+    <!-- 场景设置：random 模式每一回合使用 seed+environment_id 独立复现 -->
+    <arg name="environment_mode" default="fixed" />
+    <arg name="random_env_seed" default="20260730" />
+    <arg name="random_min_obstacles" default="3" />
+    <arg name="random_max_obstacles" default="6" />
+    <arg name="random_obstacle_x_min" default="2.0" />
+    <arg name="random_obstacle_x_max" default="13.0" />
+    <arg name="random_obstacle_y_min" default="-3.0" />
+    <arg name="random_obstacle_y_max" default="3.0" />
+    <arg name="random_min_center_separation" default="1.35" />
+    <arg name="force_path_obstacle" default="true" />
+    <!-- world.world 的 cylinder 真实半径是 0.25m；审计半径与物理半径分开保存 -->
+    <arg name="obstacle_physical_radius" default="0.25" />
+    <arg name="collision_audit_obstacle_radius" default="0.25" />
 
     <!-- 当前模型结构参数：必须和训练 main.py / model.py 保持一致 -->
     <arg name="state_dim" default="4" />
@@ -73,7 +92,7 @@
     <arg name="qp_solution_violation_tol" default="0.001" />
     <arg name="qp_solution_debug_max_print" default="20" />
     <arg name="qp_suppress_qpth_warnings" default="true" />
-    <arg name="qpth_fail_fallback_to_jax" default="true" />
+    <arg name="qpth_fail_fallback_to_jax" default="false" />
 
     <!-- 可学习 lambda：节点会根据 checkpoint 是否含 lambda_raw/lambda_prior 自动修正 -->
     <arg name="learnable_lambda_smooth" default="true" />
@@ -83,8 +102,9 @@
 
     <!-- learnable CDF-G/h 参数：与训练端 argument.py 对齐 -->
     <arg name="use_learned_cdf_constraints" default="true" />
-    <arg name="cdf_l_k" default="0.38" />
-    <arg name="cdf_r_ego" default="0.31" />
+    <arg name="cdf_l_k" default="0.33" />
+    <!-- v0.1.2测试：物理半径0.31m不变，CDF半径增至0.36m（+0.05m裕量） -->
+    <arg name="cdf_r_ego" default="0.36" />
     <arg name="cdf_sense_range" default="3.0" />
     <arg name="cdf_alpha_init" default="0.5" />
     <arg name="cdf_alpha_min" default="0.10" />
@@ -129,6 +149,9 @@
         <param name="model_path" value="$(arg model_path)" />
         <param name="output_csv" value="$(arg output_csv)" />
         <param name="trajectory_save_dir" value="$(arg trajectory_save_dir)" />
+        <param name="experiment_version" value="$(arg experiment_version)" />
+        <param name="run_id" value="$(arg run_id)" />
+        <param name="result_dir" value="$(arg result_dir)" />
         <param name="num_demos" type="int" value="$(arg num_demos)" />
         <param name="demo_seed" type="int" value="$(arg demo_seed)" />
         <param name="train_seed" type="int" value="$(arg train_seed)" />
@@ -147,6 +170,19 @@
         <param name="hold_before_episode" type="double" value="$(arg hold_before_episode)" />
         <param name="goal_radius" type="double" value="$(arg goal_radius)" />
         <param name="terminate_on_collision" type="bool" value="$(arg terminate_on_collision)" />
+
+        <param name="environment_mode" value="$(arg environment_mode)" />
+        <param name="random_env_seed" type="int" value="$(arg random_env_seed)" />
+        <param name="random_min_obstacles" type="int" value="$(arg random_min_obstacles)" />
+        <param name="random_max_obstacles" type="int" value="$(arg random_max_obstacles)" />
+        <param name="random_obstacle_x_min" type="double" value="$(arg random_obstacle_x_min)" />
+        <param name="random_obstacle_x_max" type="double" value="$(arg random_obstacle_x_max)" />
+        <param name="random_obstacle_y_min" type="double" value="$(arg random_obstacle_y_min)" />
+        <param name="random_obstacle_y_max" type="double" value="$(arg random_obstacle_y_max)" />
+        <param name="random_min_center_separation" type="double" value="$(arg random_min_center_separation)" />
+        <param name="force_path_obstacle" type="bool" value="$(arg force_path_obstacle)" />
+        <param name="obstacle_physical_radius" type="double" value="$(arg obstacle_physical_radius)" />
+        <param name="collision_audit_obstacle_radius" type="double" value="$(arg collision_audit_obstacle_radius)" />
 
         <param name="state_dim" type="int" value="$(arg state_dim)" />
         <param name="hidden_dim" type="int" value="$(arg hidden_dim)" />

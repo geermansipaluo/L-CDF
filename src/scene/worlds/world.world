@@ -382,7 +382,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-1.85628 -0.837467 0 0 -0 0</pose>
     </model>
@@ -479,7 +479,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-2.80423 -0.319608 0 0 -0 0</pose>
     </model>
@@ -576,7 +576,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-3.87798 -0.655337 0 0 -0 0</pose>
     </model>
@@ -673,7 +673,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-4.01964 0.235364 0 0 -0 0</pose>
     </model>
@@ -770,7 +770,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-4.40116 -1.83406 0 0 -0 0</pose>
     </model>
@@ -867,7 +867,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-5.20548 -0.453411 0 0 -0 0</pose>
     </model>
@@ -964,7 +964,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-5.6487 -1.5868 0 0 -0 0</pose>
     </model>
@@ -1061,7 +1061,7 @@
         <gravity>1</gravity>
         <enable_wind>0</enable_wind>
       </link>
-      <static>0</static>
+      <static>1</static>
       <allow_auto_disable>1</allow_auto_disable>
       <pose>-6.18527 -0.698302 0 0 -0 0</pose>
     </model>

@@ -1,4 +1,9 @@
 # DensityNet
+
+> 本地实验开发、版本记录和逐步运行说明见
+> [EXPERIMENT_README.md](./EXPERIMENT_README.md)。当前实验版本为 `v0.1.2`，
+> 内容是 `cdf_r_ego=0.36` 下的20个可复现随机环境闭环测试。
+
 This repository is the companion code for paper <DensityNet: Learning Control Density Function for End-to-End Safe Navigation in Unknown Environments>, which has been submitted to RA-L. This code includes the generation of the dataset, the training of the network, and the code for physical experimental validation (CDF-Base, GP-CBF, DensityNet). The main part of the code is located in the "sensor_cdf" folder.
 
 ## Robot Model Diagram
@@ -61,4 +66,3 @@ e.g. roslaunch direct_lidar_inertial_odometry dlio.launch
 # 4. Launch the control algorithm.
 roslaunch sensor_cdf train_cdf.launch
 ```
-

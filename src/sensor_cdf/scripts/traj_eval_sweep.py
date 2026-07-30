@@ -2,9 +2,12 @@
 import os
 import sys
 import csv
+import json
 import signal
 import time
 import inspect
+import subprocess
+from datetime import datetime
 
 import rospy
 import torch
@@ -22,6 +25,14 @@ from torch_geometric.data import Data, Batch
 from model import UNet
 from pointnet2_policy import PointNet2Policy
 from data_generate import LocalSdfCdfPlanner
+from experiment_utils import (
+    build_random_circle_scenarios,
+    render_summary_markdown,
+    summarize_episode_results,
+    to_builtin,
+    write_csv,
+    write_json,
+)
 
 
 def ros_bool(value, default=False):
@@ -91,12 +102,53 @@ class ParametricEllipseTracker:
             "~trajectory_save_dir",
             "/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories",
         )
+        self.experiment_version = str(rospy.get_param("~experiment_version", "v0.1.2"))
+        self.run_id = str(rospy.get_param("~run_id", "")).strip()
+        if not self.run_id:
+            self.run_id = (
+                f"{self.experiment_version}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+        self.result_dir = str(rospy.get_param("~result_dir", "")).strip()
+        if not self.result_dir:
+            self.result_dir = os.path.join(
+                "/home/guo/L-CDF/results/evaluation",
+                self.run_id,
+            )
+        self.run_started_at = datetime.now().astimezone().isoformat()
 
         self.num_demos = int(rospy.get_param("~num_demos", -1))
         self.demo_seed = int(rospy.get_param("~demo_seed", -1))
         self.train_seed = int(rospy.get_param("~train_seed", -1))
 
         self.total_eval_episodes = int(rospy.get_param("~num_eval_episodes", 10))
+        self.environment_mode = str(rospy.get_param("~environment_mode", "fixed")).lower()
+        if self.environment_mode not in ("fixed", "random"):
+            rospy.logwarn(f"未知 environment_mode={self.environment_mode}，自动使用 fixed")
+            self.environment_mode = "fixed"
+        self.random_env_seed = int(rospy.get_param("~random_env_seed", 20260730))
+        self.random_min_obstacles = int(rospy.get_param("~random_min_obstacles", 3))
+        self.random_max_obstacles = int(rospy.get_param("~random_max_obstacles", 6))
+        self.random_obstacle_x_min = float(rospy.get_param("~random_obstacle_x_min", 2.0))
+        self.random_obstacle_x_max = float(rospy.get_param("~random_obstacle_x_max", 13.0))
+        self.random_obstacle_y_min = float(rospy.get_param("~random_obstacle_y_min", -3.0))
+        self.random_obstacle_y_max = float(rospy.get_param("~random_obstacle_y_max", 3.0))
+        self.random_min_center_separation = float(
+            rospy.get_param("~random_min_center_separation", 1.35)
+        )
+        self.force_path_obstacle = ros_bool(
+            rospy.get_param("~force_path_obstacle", True), True
+        )
+        # world.world 中 cylinder_0...7 的真实几何半径为 0.25m。
+        self.obstacle_physical_radius = float(
+            rospy.get_param("~obstacle_physical_radius", 0.25)
+        )
+        # 评测碰撞阈值可独立设置。随机基准默认与真实几何半径一致。
+        self.collision_audit_obstacle_radius = float(
+            rospy.get_param(
+                "~collision_audit_obstacle_radius",
+                self.obstacle_physical_radius,
+            )
+        )
         self.test_target_seed = int(rospy.get_param("~test_target_seed", 2026))
         self.target_mode = str(rospy.get_param("~target_mode", "fixed")).lower()
         self.fixed_target_x = float(rospy.get_param("~fixed_target_x", 15.0))
@@ -223,6 +275,7 @@ class ParametricEllipseTracker:
         self.lambda_gh = float(rospy.get_param("~lambda_gh", 0.001))
 
         os.makedirs(self.trajectory_save_dir, exist_ok=True)
+        os.makedirs(self.result_dir, exist_ok=True)
 
         # ============================================================
         # 3. 控制和评估配置：与当前 traj_generate.py 的 u=[v,L*w] 表示保持一致
@@ -251,33 +304,38 @@ class ParametricEllipseTracker:
         self.last_cloud_num_points = 0
 
         self.test_targets = self.build_test_targets()
+        self.test_environments = self.build_test_environments()
         self.episode_index = 0
         self.target_pos = self.test_targets[self.episode_index].tolist()
+        self.obstacles = self.get_environment_obstacle_centers(self.episode_index)
         now = time.time()
         self.episode_hold_until = now + self.hold_before_episode
         self.current_episode_start_time = self.episode_hold_until
         self.episode_finish_lock = False
 
-        # 固定评测场景中的圆柱障碍物中心；用于碰撞统计。
-        self.obstacles = np.array(
-            [
-                [5.0, 0.05],
-                [6.5, -0.5],
-                # [8.0, -2.5],
-                [10.0, -0.5],
-            ],
-            dtype=np.float32,
+        self.physical_collision_threshold = (
+            self.obstacle_physical_radius + self.cbf_config["r_ego"]
         )
-        self.safety_threshold = 0.5 + self.cbf_config["r_ego"]
+        self.safety_threshold = (
+            self.collision_audit_obstacle_radius + self.cbf_config["r_ego"]
+        )
+        self.cdf_clearance_threshold = (
+            self.obstacle_physical_radius + self.cdf_r_ego
+        )
 
         self.all_runs_trajectories = []
         self.current_run_trajectory = []
+        self.all_episode_steps = []
+        self.current_episode_steps = []
+        self.episode_results = []
         self.reached_goals_count = 0
         self.perfect_runs_count = 0
         self.collision_runs_count = 0
+        self.physical_collision_runs_count = 0
         self.timeout_runs_count = 0
         self.total_collision_events = 0
         self.collision_happened_in_current_run = False
+        self.physical_collision_happened_in_current_run = False
         self.last_collision_time = 0.0
 
         # JAX 专家只用于：根据网络 u_nom 和当前局部点云生成 SDF-CDF-QP 的 G/h；
@@ -297,8 +355,14 @@ class ParametricEllipseTracker:
             self.set_model_state_srv = None
             rospy.logwarn(f"Gazebo /set_model_state 服务不可用: {e}")
 
-        self.apply_fixed_obstacles_to_gazebo()
+        self.apply_current_environment_to_gazebo()
         self.model = self.load_model()
+        self.reset_episode_diagnostics()
+        # JAX warmup、Gazebo服务等待和模型加载不应占用第一回合的时间预算。
+        first_episode_ready_time = time.time()
+        self.episode_hold_until = first_episode_ready_time + self.hold_before_episode
+        self.current_episode_start_time = self.episode_hold_until
+        self.save_run_configuration(status="initialized")
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -319,12 +383,19 @@ class ParametricEllipseTracker:
         rospy.loginfo(f"num_demos/dseed/seed    = {self.num_demos}/{self.demo_seed}/{self.train_seed}")
         rospy.loginfo(f"network_arch            = {self.network_arch}")
         rospy.loginfo(f"runtime_qp_mode         = {self.runtime_qp_mode}")
+        rospy.loginfo(f"environment_mode       = {self.environment_mode}")
+        rospy.loginfo(f"random_env_seed        = {self.random_env_seed}")
         rospy.loginfo(f"graph_k/hidden/lambda   = {self.model_graph_k}/{self.model_hidden_dim}/{self.model_lambda_smooth}")
         rospy.loginfo(f"box/normalize/fail_mode = {self.use_qp_box_constraints}/{self.qp_normalize_constraints}/{self.qp_fail_mode}")
+        rospy.loginfo(
+            f"robot_radius/cdf_radius = {self.cbf_config['r_ego']}/{self.cdf_r_ego} "
+            f"(margin={self.cdf_r_ego - self.cbf_config['r_ego']:+.3f}m)"
+        )
         rospy.loginfo(f"target_mode             = {self.target_mode}")
         rospy.loginfo(f"first_target            = {self.target_pos}")
         rospy.loginfo(f"num_eval_episodes       = {self.total_eval_episodes}")
         rospy.loginfo(f"output_csv              = {self.output_csv}")
+        rospy.loginfo(f"result_dir              = {self.result_dir}")
         rospy.loginfo("=" * 70)
 
     # ============================================================
@@ -358,6 +429,166 @@ class ParametricEllipseTracker:
             targets = np.tile(fixed_target[None, :], (self.total_eval_episodes, 1)).astype(np.float32)
 
         return targets
+
+    def build_test_environments(self):
+        """Build fixed or deterministic random obstacle layouts for all episodes."""
+        if self.environment_mode == "random":
+            return build_random_circle_scenarios(
+                num_scenarios=self.total_eval_episodes,
+                seed=self.random_env_seed,
+                targets=self.test_targets,
+                min_obstacles=self.random_min_obstacles,
+                max_obstacles=self.random_max_obstacles,
+                obstacle_radius=self.obstacle_physical_radius,
+                robot_radius=self.cbf_config["r_ego"],
+                x_min=self.random_obstacle_x_min,
+                x_max=self.random_obstacle_x_max,
+                y_min=self.random_obstacle_y_min,
+                y_max=self.random_obstacle_y_max,
+                min_center_separation=self.random_min_center_separation,
+                force_path_obstacle=self.force_path_obstacle,
+            )
+
+        fixed_centers = [[5.0, 0.05], [6.5, -0.5], [10.0, -0.5]]
+        return [
+            {
+                "environment_id": i,
+                "seed": None,
+                "start": [0.0, 0.0, 0.0],
+                "target": self.test_targets[i].tolist(),
+                "obstacle_radius": self.obstacle_physical_radius,
+                "obstacles_static": True,
+                "robot_radius": self.cbf_config["r_ego"],
+                "obstacles": [
+                    {
+                        "model_name": f"cylinder_{j}",
+                        "center": list(center),
+                        "radius": self.obstacle_physical_radius,
+                    }
+                    for j, center in enumerate(fixed_centers)
+                ],
+            }
+            for i in range(self.total_eval_episodes)
+        ]
+
+    def get_environment_obstacle_centers(self, index):
+        scene = self.test_environments[int(index)]
+        centers = [obs["center"] for obs in scene.get("obstacles", [])]
+        if not centers:
+            return np.zeros((0, 2), dtype=np.float32)
+        return np.asarray(centers, dtype=np.float32).reshape(-1, 2)
+
+    def get_git_info(self):
+        repo_root = "/home/guo/L-CDF"
+        info = {"commit": None, "branch": None, "dirty": None}
+        commands = {
+            "commit": ["git", "rev-parse", "HEAD"],
+            "branch": ["git", "branch", "--show-current"],
+            "dirty": ["git", "status", "--porcelain"],
+        }
+        for key, cmd in commands.items():
+            try:
+                value = subprocess.check_output(
+                    cmd,
+                    cwd=repo_root,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                ).strip()
+                info[key] = bool(value) if key == "dirty" else value
+            except Exception:
+                pass
+        return info
+
+    def build_run_configuration(self, status):
+        cdf_runtime = {}
+        if hasattr(self, "model") and hasattr(self.model, "cdf_parameter_dict"):
+            try:
+                cdf_runtime = self.model.cdf_parameter_dict()
+            except Exception:
+                cdf_runtime = {}
+        return {
+            "status": status,
+            "experiment_version": self.experiment_version,
+            "run_id": self.run_id,
+            "run_started_at": self.run_started_at,
+            "updated_at": datetime.now().astimezone().isoformat(),
+            "result_dir": self.result_dir,
+            "model_path": self.resolve_model_path(self.model_path),
+            "git": self.get_git_info(),
+            "environment_mode": self.environment_mode,
+            "num_eval_episodes": self.total_eval_episodes,
+            "random_env_seed": self.random_env_seed,
+            "random_obstacle_count": [
+                self.random_min_obstacles,
+                self.random_max_obstacles,
+            ],
+            "random_obstacle_bounds": {
+                "x": [self.random_obstacle_x_min, self.random_obstacle_x_max],
+                "y": [self.random_obstacle_y_min, self.random_obstacle_y_max],
+                "min_center_separation": self.random_min_center_separation,
+                "force_path_obstacle": self.force_path_obstacle,
+            },
+            "start": [0.0, 0.0, 0.0],
+            "target_mode": self.target_mode,
+            "fixed_target": [self.fixed_target_x, self.fixed_target_y],
+            "test_target_seed": self.test_target_seed,
+            "robot_physical_radius": self.cbf_config["r_ego"],
+            "obstacle_physical_radius": self.obstacle_physical_radius,
+            "obstacles_static": True,
+            "collision_audit_obstacle_radius": self.collision_audit_obstacle_radius,
+            "cdf_r_ego": self.cdf_r_ego,
+            "cdf_safety_margin": self.cdf_r_ego - self.cbf_config["r_ego"],
+            "physical_collision_threshold": self.physical_collision_threshold,
+            "collision_audit_threshold": self.safety_threshold,
+            "cdf_clearance_threshold": self.cdf_clearance_threshold,
+            "cdf_l_k": self.cdf_l_k,
+            "cdf_sense_range": self.cdf_sense_range,
+            "cdf_runtime_parameters": cdf_runtime,
+            "network_arch": self.network_arch,
+            "runtime_qp_mode": self.runtime_qp_mode,
+            "ablation": self.model_ablation,
+            "graph_k": self.model_graph_k,
+            "hidden_dim": self.model_hidden_dim,
+            "nominal_speed": self.nominal_speed,
+            "qp_limit": self.model_qp_limit,
+            "qp_fail_mode": self.qp_fail_mode,
+            "qpth_fail_fallback_to_jax": self.qpth_fail_fallback_to_jax,
+            "goal_radius": self.goal_radius,
+            "max_episode_time": self.max_episode_time,
+            "terminate_on_collision": self.terminate_on_collision,
+            "control_period_sec": 0.1,
+        }
+
+    def save_run_configuration(self, status):
+        write_json(
+            os.path.join(self.result_dir, "config.json"),
+            self.build_run_configuration(status=status),
+        )
+        write_json(
+            os.path.join(self.result_dir, "scenarios.json"),
+            self.test_environments,
+        )
+
+    def get_qpth_fail_count(self):
+        safety = getattr(getattr(self, "model", None), "safety_layer", None)
+        if safety is None:
+            return 0
+        try:
+            return int(safety.get_qp_stats().get("qp_fail_count", 0))
+        except Exception:
+            return int(getattr(safety, "_qp_fail_count", 0))
+
+    def reset_episode_diagnostics(self):
+        self.current_episode_steps = []
+        self.episode_qpth_fail_start = self.get_qpth_fail_count()
+        self.episode_qpth_fallback_steps = 0
+        self.episode_collision_events = 0
+        self.episode_min_center_distance = float("inf")
+        self.episode_min_physical_clearance = float("inf")
+        self.episode_min_audit_clearance = float("inf")
+        self.episode_min_cdf_clearance = float("inf")
+        self.physical_collision_happened_in_current_run = False
+        self.collision_currently_active = False
 
     # ============================================================
     # 工具函数
@@ -641,18 +872,20 @@ class ParametricEllipseTracker:
             rospy.logwarn(f"调用 /gazebo/set_model_state 失败: {model_name}, error={e}")
             return False
 
-    def apply_fixed_obstacles_to_gazebo(self):
-        fixed_obstacles = [
-            [5.0, 0.05],
-            [6.5, -0.5],
-            # [8.0, -2.5],
-            [10.0, -0.5],
-        ]
-        for i, p in enumerate(fixed_obstacles):
+    def apply_current_environment_to_gazebo(self):
+        scene = self.test_environments[self.episode_index]
+        scene_obstacles = scene.get("obstacles", [])
+        for i, obstacle in enumerate(scene_obstacles):
+            p = obstacle["center"]
             self.set_gazebo_model_pose(f"cylinder_{i}", float(p[0]), float(p[1]), z=0.25)
-        for i in range(len(fixed_obstacles), 8):
+        for i in range(len(scene_obstacles), 8):
             self.set_gazebo_model_pose(f"cylinder_{i}", 80.0 + 3.0 * i, 20.0, z=0.25)
-        rospy.logwarn("固定评测场景已同步到 Gazebo: cylinder_0~2 已摆放，其余 cylinder 已隐藏")
+        self.obstacles = self.get_environment_obstacle_centers(self.episode_index)
+        rospy.logwarn(
+            f"评测场景已同步到 Gazebo: mode={self.environment_mode}, "
+            f"environment_id={scene['environment_id']}, seed={scene.get('seed')}, "
+            f"obstacles={len(scene_obstacles)}, target={self.target_pos}"
+        )
 
     def publish_target_marker(self):
         marker = Marker()
@@ -788,20 +1021,50 @@ class ParametricEllipseTracker:
             self.finish_episode(arrived=False, reason="timeout")
             return
 
-        # 碰撞统计
+        # 碰撞与净空统计：同时记录真实Gazebo几何碰撞和可配置评测阈值。
         ego_center = np.array([x, y], dtype=np.float32)
-        distances_to_obs = np.linalg.norm(self.obstacles - ego_center, axis=1)
-        if np.any(distances_to_obs < self.safety_threshold):
+        if self.obstacles.shape[0] > 0:
+            distances_to_obs = np.linalg.norm(self.obstacles - ego_center, axis=1)
+            min_center_distance = float(np.min(distances_to_obs))
+        else:
+            distances_to_obs = np.zeros((0,), dtype=np.float32)
+            min_center_distance = float("inf")
+        physical_clearance = min_center_distance - self.physical_collision_threshold
+        audit_clearance = min_center_distance - self.safety_threshold
+        cdf_clearance = min_center_distance - self.cdf_clearance_threshold
+        self.episode_min_center_distance = min(
+            self.episode_min_center_distance, min_center_distance
+        )
+        self.episode_min_physical_clearance = min(
+            self.episode_min_physical_clearance, physical_clearance
+        )
+        self.episode_min_audit_clearance = min(
+            self.episode_min_audit_clearance, audit_clearance
+        )
+        self.episode_min_cdf_clearance = min(
+            self.episode_min_cdf_clearance, cdf_clearance
+        )
+
+        if np.any(distances_to_obs < self.physical_collision_threshold):
+            self.physical_collision_happened_in_current_run = True
+
+        is_audit_collision = bool(
+            np.any(distances_to_obs < self.safety_threshold)
+        )
+        if is_audit_collision:
             first_collision = not self.collision_happened_in_current_run
             self.collision_happened_in_current_run = True
-            current_time = time.time()
-            if current_time - self.last_collision_time > 0.5:
+            # 只在“未碰撞 -> 碰撞”的进入边沿计数。持续接触只算一次事件。
+            if not self.collision_currently_active:
                 self.total_collision_events += 1
-                self.last_collision_time = current_time
+                self.episode_collision_events += 1
+                self.collision_currently_active = True
                 rospy.logerr(f"碰撞警告: 当前总碰撞事件计数 {self.total_collision_events}")
             if first_collision and self.terminate_on_collision:
                 self.finish_episode(arrived=False, reason="collision")
                 return
+        else:
+            self.collision_currently_active = False
 
         dx = float(self.target_pos[0]) - x
         dy = float(self.target_pos[1]) - y
@@ -822,6 +1085,9 @@ class ParametricEllipseTracker:
         else:
             analytic_u_nom = np.zeros(2, dtype=np.float32)
 
+        inference_start = time.perf_counter()
+        u_nom_np = analytic_u_nom.astype(np.float32)
+        qpth_fallback_used = False
         is_empty = (
             self.pointcloud_local.shape[0] == 0
             or (
@@ -838,7 +1104,6 @@ class ParametricEllipseTracker:
             local_pts = self.pointcloud_local.astype(np.float32)
             points_batch = self.make_points_batch(local_pts)
 
-            u_nom_np = None
             u_jax_np = None
 
             if self.runtime_qp_mode == "nominal":
@@ -880,6 +1145,8 @@ class ParametricEllipseTracker:
                     rospy.logerr(f"learned PyTorch CDF-QP 推理失败: {e}")
                     if self.qpth_fail_fallback_to_jax:
                         rospy.logwarn("已回退到 JAX/ProxQP 安全投影输出，避免当前 episode 中断。")
+                        qpth_fallback_used = True
+                        self.episode_qpth_fallback_steps += 1
                         u_nom_tensor = self.predict_model_unom(state_tensor, points_batch)
                         u_nom_np = u_nom_tensor.detach().cpu().numpy().reshape(-1).astype(np.float32)[:2]
                         u_nom_np = np.clip(u_nom_np, -self.model_qp_limit, self.model_qp_limit).astype(np.float32)
@@ -900,6 +1167,7 @@ class ParametricEllipseTracker:
                     else:
                         u_safe_np = np.zeros(2, dtype=np.float32)
 
+        inference_ms = (time.perf_counter() - inference_start) * 1000.0
         if len(u_safe_np) < 2 or (not np.all(np.isfinite(u_safe_np[:2]))):
             v_final = 0.0
             w_final = 0.0
@@ -908,6 +1176,55 @@ class ParametricEllipseTracker:
             v_final = float(np.clip(u_safe_np[0], self.cbf_config["v_min"], self.cbf_config["v_max"]))
             w_final = float(np.clip(u_safe_np[1] / l_k, self.cbf_config["w_min"], self.cbf_config["w_max"]))
             u_safe_np = np.array([v_final, w_final * l_k], dtype=np.float32)
+
+        valid_lidar = self.pointcloud_local
+        if (
+            valid_lidar.shape[0] == 1
+            and valid_lidar[0, 0] == 99
+            and valid_lidar[0, 1] == 99
+        ):
+            valid_lidar = np.zeros((0, 2), dtype=np.float32)
+        lidar_ranges = (
+            np.linalg.norm(valid_lidar, axis=1)
+            if valid_lidar.shape[0] > 0
+            else np.zeros((0,), dtype=np.float32)
+        )
+        correction_norm = float(
+            np.linalg.norm(
+                np.asarray(u_safe_np, dtype=np.float32)
+                - np.asarray(u_nom_np, dtype=np.float32)
+            )
+        )
+        step_record = {
+            "environment_id": self.episode_index,
+            "step": len(self.current_episode_steps),
+            "elapsed_sec": max(0.0, time.time() - self.current_episode_start_time),
+            "pose": [x, y, theta],
+            "target": list(self.target_pos),
+            "distance_to_goal_m": float(dist_to_goal_val),
+            "num_lidar_points": int(valid_lidar.shape[0]),
+            "min_lidar_range_m": float(np.min(lidar_ranges)) if lidar_ranges.size else None,
+            "min_center_distance_m": (
+                min_center_distance if np.isfinite(min_center_distance) else None
+            ),
+            "physical_clearance_m": (
+                physical_clearance if np.isfinite(physical_clearance) else None
+            ),
+            "audit_clearance_m": (
+                audit_clearance if np.isfinite(audit_clearance) else None
+            ),
+            "cdf_clearance_m": (
+                cdf_clearance if np.isfinite(cdf_clearance) else None
+            ),
+            "u_nom_v_Lomega": np.asarray(u_nom_np, dtype=np.float32).tolist(),
+            "u_safe_v_Lomega": np.asarray(u_safe_np, dtype=np.float32).tolist(),
+            "cmd_v_omega": [v_final, w_final],
+            "control_correction_norm": correction_norm,
+            "inference_ms": float(inference_ms),
+            "qpth_fallback_used": qpth_fallback_used,
+            "runtime_qp_mode": self.runtime_qp_mode,
+        }
+        self.current_episode_steps.append(step_record)
 
         self.last_executed_v = v_final
         self.last_executed_w = w_final * l_k
@@ -923,6 +1240,144 @@ class ParametricEllipseTracker:
     # ============================================================
     # episode 结束、保存和 CSV
     # ============================================================
+    @staticmethod
+    def finite_or_none(value):
+        value = float(value)
+        return value if np.isfinite(value) else None
+
+    def build_episode_result(self, arrived, reason):
+        """Aggregate one episode without mixing CDF margin and physical contact."""
+        steps = self.current_episode_steps
+        poses = (
+            np.asarray([step["pose"][:2] for step in steps], dtype=np.float64)
+            if steps
+            else np.zeros((0, 2), dtype=np.float64)
+        )
+        scene = self.test_environments[self.episode_index]
+        start_xy = np.asarray(scene.get("start", [0.0, 0.0])[:2], dtype=np.float64)
+        target_xy = np.asarray(self.target_pos, dtype=np.float64)
+        current_xy = np.asarray(self.current_pose[:2], dtype=np.float64)
+        path_points = np.vstack([start_xy, poses, current_xy])
+        path_length = float(
+            np.linalg.norm(np.diff(path_points, axis=0), axis=1).sum()
+        )
+        straight_distance = float(np.linalg.norm(target_xy - start_xy))
+        endpoint_error = float(np.linalg.norm(current_xy - target_xy))
+        direct_progress = max(0.0, straight_distance - endpoint_error)
+
+        def step_values(key):
+            return [
+                float(step[key])
+                for step in steps
+                if step.get(key) is not None and np.isfinite(float(step[key]))
+            ]
+
+        def mean_or_none(values):
+            return float(np.mean(values)) if values else None
+
+        def max_or_none(values):
+            return float(np.max(values)) if values else None
+
+        v_values = [abs(float(step["cmd_v_omega"][0])) for step in steps]
+        w_values = [abs(float(step["cmd_v_omega"][1])) for step in steps]
+        lidar_counts = [int(step["num_lidar_points"]) for step in steps]
+        lidar_ranges = step_values("min_lidar_range_m")
+        corrections = step_values("control_correction_norm")
+        inference = step_values("inference_ms")
+
+        physical_collision = bool(self.physical_collision_happened_in_current_run)
+        audit_collision = bool(self.collision_happened_in_current_run)
+        return {
+            "environment_id": int(self.episode_index),
+            "scene_seed": scene.get("seed"),
+            "obstacle_count": len(scene.get("obstacles", [])),
+            "start": scene.get("start", [0.0, 0.0, 0.0]),
+            "target": list(self.target_pos),
+            "finish_reason": str(reason),
+            "arrived": bool(arrived),
+            "collision": audit_collision,
+            "physical_collision": physical_collision,
+            "success": bool(arrived and not audit_collision),
+            "physical_success": bool(arrived and not physical_collision),
+            "duration_sec": max(0.0, time.time() - self.current_episode_start_time),
+            "control_steps": len(steps),
+            "path_length_m": path_length,
+            "straight_line_distance_m": straight_distance,
+            "direct_progress_m": direct_progress,
+            "path_efficiency": (
+                direct_progress / path_length if path_length > 1e-9 else None
+            ),
+            "endpoint_error_m": endpoint_error,
+            "min_center_distance_m": self.finite_or_none(
+                self.episode_min_center_distance
+            ),
+            "min_physical_clearance_m": self.finite_or_none(
+                self.episode_min_physical_clearance
+            ),
+            "min_audit_clearance_m": self.finite_or_none(
+                self.episode_min_audit_clearance
+            ),
+            "min_cdf_clearance_m": self.finite_or_none(
+                self.episode_min_cdf_clearance
+            ),
+            "cdf_envelope_violated": bool(self.episode_min_cdf_clearance < 0.0),
+            "mean_linear_speed_mps": mean_or_none(v_values),
+            "max_linear_speed_mps": max_or_none(v_values),
+            "mean_abs_angular_speed_rps": mean_or_none(w_values),
+            "max_abs_angular_speed_rps": max_or_none(w_values),
+            "mean_lidar_points": mean_or_none(lidar_counts),
+            "min_lidar_range_m": min(lidar_ranges) if lidar_ranges else None,
+            "mean_control_correction": mean_or_none(corrections),
+            "max_control_correction": max_or_none(corrections),
+            "mean_inference_ms": mean_or_none(inference),
+            "p95_inference_ms": (
+                float(np.percentile(inference, 95)) if inference else None
+            ),
+            "max_inference_ms": max_or_none(inference),
+            "collision_events": int(self.episode_collision_events),
+            "qpth_failures": max(
+                0, self.get_qpth_fail_count() - self.episode_qpth_fail_start
+            ),
+            "qpth_fallback_steps": int(self.episode_qpth_fallback_steps),
+            "cdf_r_ego": float(self.cdf_r_ego),
+            "cdf_safety_margin_m": float(
+                self.cdf_r_ego - self.cbf_config["r_ego"]
+            ),
+            "robot_physical_radius_m": float(self.cbf_config["r_ego"]),
+            "obstacle_physical_radius_m": float(self.obstacle_physical_radius),
+            "collision_audit_threshold_m": float(self.safety_threshold),
+            "cdf_clearance_threshold_m": float(self.cdf_clearance_threshold),
+        }
+
+    def save_detailed_results(self, status):
+        """Overwrite a consistent snapshot so interrupted runs remain usable."""
+        self.save_run_configuration(status=status)
+        write_json(os.path.join(self.result_dir, "episodes.json"), self.episode_results)
+        write_csv(os.path.join(self.result_dir, "episodes.csv"), self.episode_results)
+
+        steps_path = os.path.join(self.result_dir, "steps.jsonl")
+        with open(steps_path, "w", encoding="utf-8") as f:
+            for episode_steps in self.all_episode_steps:
+                for step in episode_steps:
+                    f.write(json.dumps(to_builtin(step), ensure_ascii=False) + "\n")
+
+        summary = summarize_episode_results(self.episode_results)
+        run_config = self.build_run_configuration(status=status)
+        write_json(os.path.join(self.result_dir, "summary.json"), summary)
+        with open(
+            os.path.join(self.result_dir, "summary.md"), "w", encoding="utf-8"
+        ) as f:
+            f.write(render_summary_markdown(summary, run_config))
+            f.write("\n")
+        torch.save(
+            self.all_runs_trajectories,
+            os.path.join(self.result_dir, "trajectories.pt"),
+        )
+        rospy.loginfo(
+            f"详细结果快照已保存: status={status}, "
+            f"episodes={len(self.episode_results)}, dir={self.result_dir}"
+        )
+
     def finish_episode(self, arrived, reason):
         if self.episode_finish_lock:
             return
@@ -941,16 +1396,23 @@ class ParametricEllipseTracker:
                 self.perfect_runs_count += 1
         if self.collision_happened_in_current_run:
             self.collision_runs_count += 1
+        if self.physical_collision_happened_in_current_run:
+            self.physical_collision_runs_count += 1
         if reason == "timeout":
             self.timeout_runs_count += 1
 
+        episode_result = self.build_episode_result(arrived=arrived, reason=reason)
+        self.episode_results.append(episode_result)
+        self.all_episode_steps.append(list(self.current_episode_steps))
         self.all_runs_trajectories.append(self.current_run_trajectory)
+        self.save_detailed_results(status="running")
         self.print_final_report()
 
         if self.episode_index + 1 >= self.total_eval_episodes:
             rospy.logerr("所有评测回合完成，正在保存轨迹和 CSV...")
             self.save_trajectory_data()
             self.append_eval_result_to_csv()
+            self.save_detailed_results(status="completed")
             self.print_final_report()
             rospy.signal_shutdown("Evaluation Completed Successfully")
             sys.exit(0)
@@ -972,10 +1434,13 @@ class ParametricEllipseTracker:
         except Exception:
             os.system("rosservice call /gazebo/reset_simulation '{}' > /dev/null 2>&1")
 
-        # reset 后重新摆放障碍物，并可选显式重置机器人模型。
+        # 先切换到下一场景，再重新摆放障碍物。
         time.sleep(0.3)
-        self.apply_fixed_obstacles_to_gazebo()
+        self.episode_index += 1
+        self.target_pos = self.test_targets[self.episode_index].tolist()
+        self.apply_current_environment_to_gazebo()
 
+        # 可选显式重置机器人模型。
         if self.robot_model_name.strip():
             ok = self.set_gazebo_model_pose(
                 self.robot_model_name.strip(), 0.0, 0.0, z=self.robot_reset_z
@@ -990,9 +1455,6 @@ class ParametricEllipseTracker:
 
         # 更新 episode 状态。注意：先设置 sensor_accept_wall_time，再清空 last_*，
         # callback 会丢弃这个时间之前到达的队列残留消息。
-        self.episode_index += 1
-        self.target_pos = self.test_targets[self.episode_index].tolist()
-
         now = time.time()
         self.reset_wall_time = now
         self.sensor_accept_wall_time = now + float(self.sensor_accept_delay)
@@ -1007,6 +1469,7 @@ class ParametricEllipseTracker:
         self.current_run_trajectory = []
         self.collision_happened_in_current_run = False
         self.last_collision_time = 0.0
+        self.reset_episode_diagnostics()
 
         self.episode_hold_until = max(now + self.hold_before_episode, self.sensor_accept_wall_time)
         self.current_episode_start_time = self.episode_hold_until
@@ -1085,6 +1548,10 @@ class ParametricEllipseTracker:
             )
 
             torch.save(self.all_runs_trajectories, trajectory_save_path)
+            torch.save(
+                self.all_runs_trajectories,
+                os.path.join(self.result_dir, "trajectories.pt"),
+            )
 
             rospy.loginfo(
                 f"轨迹落盘成功: {len(self.all_runs_trajectories)} 回合 -> {trajectory_save_path}"
@@ -1112,6 +1579,11 @@ class ParametricEllipseTracker:
         print(f"到达率 arrival_rate  : {arrival_rate:.4f} ({self.reached_goals_count}/{completed_runs})")
         print(f"成功率 success_rate  : {success_rate:.4f} ({self.perfect_runs_count}/{completed_runs})")
         print(f"碰撞率 collision_rate: {collision_rate:.4f} ({self.collision_runs_count}/{completed_runs})")
+        print(
+            f"真实碰撞率 physical  : "
+            f"{self.physical_collision_runs_count / completed_runs:.4f} "
+            f"({self.physical_collision_runs_count}/{completed_runs})"
+        )
         print(f"平均碰撞事件         : {avg_collision_events:.4f} events/episode")
         print(f"超时回合             : {self.timeout_runs_count}")
         print("=" * 70 + "\n")
@@ -1124,12 +1596,17 @@ class ParametricEllipseTracker:
         avg_collision_events = self.total_collision_events / completed_runs
 
         row = {
+            "experiment_version": self.experiment_version,
+            "run_id": self.run_id,
+            "result_dir": self.result_dir,
             "num_demos": self.num_demos,
             "demo_seed": self.demo_seed,
             "train_seed": self.train_seed,
             "num_eval_episodes": completed_runs,
             "test_target_seed": self.test_target_seed,
             "target_mode": self.target_mode,
+            "environment_mode": self.environment_mode,
+            "random_env_seed": self.random_env_seed,
             "fixed_target_x": self.fixed_target_x,
             "fixed_target_y": self.fixed_target_y,
             "runtime_qp_mode": self.runtime_qp_mode,
@@ -1140,6 +1617,10 @@ class ParametricEllipseTracker:
             "lambda_smooth": self.model_lambda_smooth,
             "learnable_lambda_smooth": self.learnable_lambda_smooth,
             "use_learned_cdf_constraints": self.use_learned_cdf_constraints,
+            "cdf_r_ego": self.cdf_r_ego,
+            "cdf_safety_margin_m": self.cdf_r_ego - self.cbf_config["r_ego"],
+            "robot_physical_radius_m": self.cbf_config["r_ego"],
+            "obstacle_physical_radius_m": self.obstacle_physical_radius,
             "cdf_alpha": getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_alpha", None).detach().cpu().item() if getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_alpha", None) is not None else None,
             "cdf_epsilon": getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_epsilon", None).detach().cpu().item() if getattr(getattr(self.model, "cdf_constraint_layer", None), "_last_epsilon", None) is not None else None,
             "qp_box": self.use_qp_box_constraints,
@@ -1147,16 +1628,18 @@ class ParametricEllipseTracker:
             "arrival_count": self.reached_goals_count,
             "success_count": self.perfect_runs_count,
             "collision_runs_count": self.collision_runs_count,
+            "physical_collision_runs_count": self.physical_collision_runs_count,
             "collision_events": self.total_collision_events,
             "timeout_runs_count": self.timeout_runs_count,
             "arrival_rate": arrival_rate,
             "success_rate": success_rate,
             "collision_rate": collision_rate,
+            "physical_collision_rate": self.physical_collision_runs_count / completed_runs,
             "avg_collision_events": avg_collision_events,
             "model_path": self.resolve_model_path(self.model_path),
         }
 
-        os.makedirs(os.path.dirname(self.output_csv), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self.output_csv)), exist_ok=True)
         file_exists = os.path.exists(self.output_csv)
         with open(self.output_csv, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(row.keys()))
@@ -1171,6 +1654,7 @@ class ParametricEllipseTracker:
         rospy.logwarn("捕获中断信号，保存当前轨迹与阶段性报告。")
         self.publish_twist(0.0, 0.0)
         self.save_trajectory_data()
+        self.save_detailed_results(status="interrupted")
         self.print_final_report()
         print("!" * 70 + "\n")
         rospy.signal_shutdown("User interrupt")
