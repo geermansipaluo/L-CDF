@@ -1,0 +1,156 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- GP-CBF 批量评测 launch：复用当前仿真环境 + perfect_lidar_bridge 点云链路 -->
+
+    <!-- 输出路径与实验标签。num_demos/demo_seed/train_seed 只用于 CSV 对齐，不参与 GP-CBF 控制。 -->
+    <arg name="output_csv" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics_gpcbf.csv" />
+    <arg name="trajectory_save_dir" default="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories" />
+    <arg name="num_demos" default="-1" />
+    <arg name="demo_seed" default="-1" />
+    <arg name="train_seed" default="-1" />
+
+    <!-- 评测目标设置：与 traj_eval_sweep.launch 保持同一套参数 -->
+    <!-- target_mode 可选: fixed_y0 / fixed / random_y0 / random -->
+    <arg name="target_mode" default="fixed" />
+    <arg name="fixed_target_x" default="15.0" />
+    <arg name="fixed_target_y" default="-1.0" />
+    <arg name="target_x_min" default="14.0" />
+    <arg name="target_x_max" default="16.0" />
+    <arg name="target_y_min" default="-2.0" />
+    <arg name="target_y_max" default="2.0" />
+    <arg name="test_target_seed" default="2026" />
+
+    <!-- 10 轮自动评测 -->
+    <arg name="num_eval_episodes" default="1" />
+    <arg name="max_episode_time" default="80.0" />
+    <arg name="hold_before_episode" default="2.0" />
+    <arg name="goal_radius" default="0.4" />
+    <arg name="terminate_on_collision" default="false" />
+
+    <!-- GP-CBF 控制参数 -->
+    <arg name="l_k" default="0.33" />
+    <arg name="r_ego" default="0.31" />
+    <arg name="obstacle_radius" default="0.5" />
+    <arg name="v_min" default="-1.2" />
+    <arg name="v_max" default="1.2" />
+    <arg name="w_min" default="-2.0" />
+    <arg name="w_max" default="2.0" />
+    <arg name="nominal_speed" default="1.0" />
+    <arg name="world_u_limit" default="1.0" />
+    <arg name="control_dt" default="0.1" />
+
+    <!-- GP 与 QP 参数 -->
+    <arg name="gp_length_scale" default="0.6" />
+    <arg name="gp_noise" default="0.01" />
+    <arg name="gp_h_shift" default="0.6" />
+    <arg name="cbf_gamma" default="0.8" />
+    <arg name="clf_gamma" default="2.0" />
+    <arg name="cbf_slack_weight" default="1000.0" />
+    <arg name="clf_slack_weight" default="1.0" />
+    <arg name="min_gp_points" default="3" />
+    <arg name="max_gp_points" default="200" />
+    <arg name="voxel_size" default="0.10" />
+    <arg name="gp_visualize" default="false" />
+
+    <!-- Reset 防旧数据参数 -->
+    <arg name="sensor_accept_delay" default="0.6" />
+    <arg name="require_fresh_pose_after_reset" default="true" />
+    <arg name="require_fresh_cloud_after_reset" default="true" />
+    <arg name="fresh_sensor_wait_timeout" default="5.0" />
+    <arg name="reset_stop_burst_count" default="8" />
+    <arg name="reset_stop_burst_dt" default="0.05" />
+    <arg name="robot_model_name" default="jackal" />
+    <arg name="robot_reset_z" default="0.15" />
+
+    <arg name="use_rviz" default="true" />
+
+    <include file="$(find scene)/launch/start.launch">
+        <arg name="world" value="$(find scene)/worlds/world.world" />
+    </include>
+
+    <include file="$(find jackal_description)/launch/description.launch" />
+
+    <include file="$(find jackal_control)/launch/control.launch">
+        <arg name="enable_ekf" value="false" />
+    </include>
+
+    <include file="$(find jackal_control)/launch/teleop.launch">
+        <arg name="joystick" value="false" />
+    </include>
+
+    <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
+          args="-urdf -model jackal -param robot_description -x 0 -y 0 -z 1.0" />
+
+    <include file="$(find local_map)/launch/for_simulation.launch" />
+
+    <node pkg="obs_param" type="obs_kf" output="screen" name="obs_kf" />
+
+    <node name="gaussian_cbf_eval" pkg="sensor_cdf" type="gaussian_planner_eval.py" output="screen" required="true">
+        <param name="output_csv" value="$(arg output_csv)" />
+        <param name="trajectory_save_dir" value="$(arg trajectory_save_dir)" />
+        <param name="num_demos" type="int" value="$(arg num_demos)" />
+        <param name="demo_seed" type="int" value="$(arg demo_seed)" />
+        <param name="train_seed" type="int" value="$(arg train_seed)" />
+
+        <param name="target_mode" value="$(arg target_mode)" />
+        <param name="fixed_target_x" type="double" value="$(arg fixed_target_x)" />
+        <param name="fixed_target_y" type="double" value="$(arg fixed_target_y)" />
+        <param name="target_x_min" type="double" value="$(arg target_x_min)" />
+        <param name="target_x_max" type="double" value="$(arg target_x_max)" />
+        <param name="target_y_min" type="double" value="$(arg target_y_min)" />
+        <param name="target_y_max" type="double" value="$(arg target_y_max)" />
+        <param name="test_target_seed" type="int" value="$(arg test_target_seed)" />
+
+        <param name="num_eval_episodes" type="int" value="$(arg num_eval_episodes)" />
+        <param name="max_episode_time" type="double" value="$(arg max_episode_time)" />
+        <param name="hold_before_episode" type="double" value="$(arg hold_before_episode)" />
+        <param name="goal_radius" type="double" value="$(arg goal_radius)" />
+        <param name="terminate_on_collision" type="bool" value="$(arg terminate_on_collision)" />
+
+        <param name="l_k" type="double" value="$(arg l_k)" />
+        <param name="r_ego" type="double" value="$(arg r_ego)" />
+        <param name="obstacle_radius" type="double" value="$(arg obstacle_radius)" />
+        <param name="v_min" type="double" value="$(arg v_min)" />
+        <param name="v_max" type="double" value="$(arg v_max)" />
+        <param name="w_min" type="double" value="$(arg w_min)" />
+        <param name="w_max" type="double" value="$(arg w_max)" />
+        <param name="nominal_speed" type="double" value="$(arg nominal_speed)" />
+        <param name="world_u_limit" type="double" value="$(arg world_u_limit)" />
+        <param name="control_dt" type="double" value="$(arg control_dt)" />
+
+        <param name="gp_length_scale" type="double" value="$(arg gp_length_scale)" />
+        <param name="gp_noise" type="double" value="$(arg gp_noise)" />
+        <param name="gp_h_shift" type="double" value="$(arg gp_h_shift)" />
+        <param name="cbf_gamma" type="double" value="$(arg cbf_gamma)" />
+        <param name="clf_gamma" type="double" value="$(arg clf_gamma)" />
+        <param name="cbf_slack_weight" type="double" value="$(arg cbf_slack_weight)" />
+        <param name="clf_slack_weight" type="double" value="$(arg clf_slack_weight)" />
+        <param name="min_gp_points" type="int" value="$(arg min_gp_points)" />
+        <param name="max_gp_points" type="int" value="$(arg max_gp_points)" />
+        <param name="voxel_size" type="double" value="$(arg voxel_size)" />
+        <param name="gp_visualize" type="bool" value="$(arg gp_visualize)" />
+
+        <param name="sensor_accept_delay" type="double" value="$(arg sensor_accept_delay)" />
+        <param name="require_fresh_pose_after_reset" type="bool" value="$(arg require_fresh_pose_after_reset)" />
+        <param name="require_fresh_cloud_after_reset" type="bool" value="$(arg require_fresh_cloud_after_reset)" />
+        <param name="fresh_sensor_wait_timeout" type="double" value="$(arg fresh_sensor_wait_timeout)" />
+        <param name="reset_stop_burst_count" type="int" value="$(arg reset_stop_burst_count)" />
+        <param name="reset_stop_burst_dt" type="double" value="$(arg reset_stop_burst_dt)" />
+        <param name="robot_model_name" value="$(arg robot_model_name)" />
+        <param name="robot_reset_z" type="double" value="$(arg robot_reset_z)" />
+        <param name="num_rays" type="int" value="256" />
+    </node>
+
+    <node name="update_state" pkg="sensor_cdf" type="update_state.py" />
+    <node name="goal_publisher" pkg="sensor_cdf" type="goal_publisher.py" />
+    <node name="pose_pub_astar" pkg="sensor_cdf" type="pose_pub_astar.py" />
+
+    <!-- 保持和当前 DensityNet 测试完全一致的点云输入。GP-CBF 节点只订阅这个输出，不再自己处理原始点云。 -->
+    <node name="perfect_lidar_bridge" pkg="sensor_cdf" type="perfect_lidar_bridge.py" output="screen">
+        <param name="num_rays" type="int" value="256" />
+        <param name="max_range" type="double" value="3.0" />
+    </node>
+
+    <node if="$(arg use_rviz)" name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find scene)/rviz_config/simulation.rviz" />
+</launch>

@@ -17,9 +17,40 @@ set -uo pipefail
 LAUNCH_PKG="${LAUNCH_PKG:-scene}"
 LAUNCH_FILE="${LAUNCH_FILE:-traj_eval_sweep.launch}"
 
-# 当前新 loss 模型默认目录；也可运行前覆盖：
-#   MODEL_ROOT=/path/to/saved_models/learnable bash run_eval_sweep.sh
-MODEL_ROOT="${MODEL_ROOT:-/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/learnable}"
+# network_arch:
+#   densitynet : 原始 DensityNet / L-CDF 模型
+#   pointnet2  : PointNet++-BC 学习型 baseline
+NETWORK_ARCH="${NETWORK_ARCH:-densitynet}"
+if [[ "${NETWORK_ARCH}" != "densitynet" && "${NETWORK_ARCH}" != "pointnet2" ]]; then
+  echo "[ERROR] NETWORK_ARCH 只能是 densitynet 或 pointnet2，当前: ${NETWORK_ARCH}"
+  exit 1
+fi
+
+# 当前模型默认目录；也可运行前覆盖：
+#   DensityNet:
+#     MODEL_ROOT=/path/to/saved_models/learnable bash run_eval_sweep.sh
+#   PointNet++:
+#     NETWORK_ARCH=pointnet2 MODEL_ROOT=/path/to/pointnet2_models bash run_eval_sweep.sh
+if [[ "${NETWORK_ARCH}" == "pointnet2" ]]; then
+  DEFAULT_MODEL_ROOT="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/pn2"
+  DEFAULT_MODEL_SUBDIR_PREFIX="PointNet2"
+  DEFAULT_CSV_PATH="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics_pointnet2.csv"
+  DEFAULT_TRAJ_DIR="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories_pointnet2"
+else
+  DEFAULT_MODEL_ROOT="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models/ablation/wo_safe"
+  DEFAULT_MODEL_SUBDIR_PREFIX="DensityNet"
+  DEFAULT_CSV_PATH="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv"
+  DEFAULT_TRAJ_DIR="/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories"
+fi
+
+MODEL_ROOT="${MODEL_ROOT:-${DEFAULT_MODEL_ROOT}}"
+MODEL_SUBDIR_PREFIX="${MODEL_SUBDIR_PREFIX:-${DEFAULT_MODEL_SUBDIR_PREFIX}}"
+# 可选：如果你的训练保存目录不是 PointNet2-demo48-dseed0-seed0 这种标准格式，
+# 可以用模板显式指定，例如：
+# MODEL_FILE_TEMPLATE="{MODEL_ROOT}/UnknownGym-DensityNet-PointNet2_BC-arch-pointnet2-ablation-no_safety-demo{N}-dseed{DS}-seed{TS}-xxx/model_best_parametric_bc.pt"
+MODEL_FILE_TEMPLATE="${MODEL_FILE_TEMPLATE:-}"
+MODEL_FIND_MAXDEPTH="${MODEL_FIND_MAXDEPTH:-4}"
+
 ALT_MODEL_ROOT="/home/guo/L-CDF/src/sensor_cdf/scripts/saved_models"
 
 if [[ ! -d "${MODEL_ROOT}" && -d "${ALT_MODEL_ROOT}" ]]; then
@@ -27,8 +58,8 @@ if [[ ! -d "${MODEL_ROOT}" && -d "${ALT_MODEL_ROOT}" ]]; then
   MODEL_ROOT="${ALT_MODEL_ROOT}"
 fi
 
-CSV_PATH="${CSV_PATH:-/home/guo/L-CDF/src/sensor_cdf/scripts/eval_metrics.csv}"
-TRAJ_DIR="${TRAJ_DIR:-/home/guo/L-CDF/src/sensor_cdf/scripts/eval_trajectories}"
+CSV_PATH="${CSV_PATH:-${DEFAULT_CSV_PATH}}"
+TRAJ_DIR="${TRAJ_DIR:-${DEFAULT_TRAJ_DIR}}"
 
 NUM_EVAL_EPISODES="${NUM_EVAL_EPISODES:-10}"
 TEST_TARGET_SEED="${TEST_TARGET_SEED:-2026}"
@@ -54,11 +85,39 @@ HIDDEN_DIM="${HIDDEN_DIM:-256}"
 GRAPH_K="${GRAPH_K:-5}"
 LAMBDA_SMOOTH="${LAMBDA_SMOOTH:-25.0}"
 QP_LIMIT="${QP_LIMIT:-1.2}"
-ABLATION="${ABLATION:-full}"
+if [[ "${NETWORK_ARCH}" == "pointnet2" ]]; then
+  ABLATION="${ABLATION:-no_safety}"
+else
+  ABLATION="${ABLATION:-no_safety}"
+fi
 NOMINAL_SPEED="${NOMINAL_SPEED:-1.2}"
 
-# qpth=评估当前模型内部 safety_layer；jax=网络 nominal + JAX/ProxQP 投影；nominal=只测 head
-RUNTIME_QP_MODE="${RUNTIME_QP_MODE:-qpth}"
+# PointNet++-BC 参数：仅 NETWORK_ARCH=pointnet2 时使用
+POINTNET2_MAX_POINTS="${POINTNET2_MAX_POINTS:-200}"
+POINTNET2_NPOINT1="${POINTNET2_NPOINT1:-64}"
+POINTNET2_RADIUS1="${POINTNET2_RADIUS1:-0.5}"
+POINTNET2_NSAMPLE1="${POINTNET2_NSAMPLE1:-16}"
+POINTNET2_NPOINT2="${POINTNET2_NPOINT2:-16}"
+POINTNET2_RADIUS2="${POINTNET2_RADIUS2:-1.0}"
+POINTNET2_NSAMPLE2="${POINTNET2_NSAMPLE2:-16}"
+POINTNET2_PADDING_VALUE="${POINTNET2_PADDING_VALUE:-99.0}"
+
+# qpth=评估当前模型内部 safety_layer；
+# nominal=只测 head；
+# post_cdfqp/bc_cdfqp/jax=网络 nominal + 解析/JAX SDF-CDF-QP 后处理。
+# 评测 Pure BC + test-time CDF-QP 推荐:
+#   ABLATION=no_safety RUNTIME_QP_MODE=bc_cdfqp MODEL_ROOT=/path/to/pure_bc_models bash run_eval_sweep.sh
+if [[ "${NETWORK_ARCH}" == "pointnet2" ]]; then
+  # PointNet++-BC 没有内部 qpth safety layer。
+  # 纯 PointNet++-BC 用 nominal；PointNet++-BC + CDFQP 可运行前覆盖 RUNTIME_QP_MODE=jax。
+  RUNTIME_QP_MODE="${RUNTIME_QP_MODE:-nominal}"
+else
+  RUNTIME_QP_MODE="${RUNTIME_QP_MODE:-nominal}"
+fi
+ENABLE_TEST_TIME_CDFQP="${ENABLE_TEST_TIME_CDFQP:-false}"
+ANALYTIC_CDFQP_NUM_POINTS="${ANALYTIC_CDFQP_NUM_POINTS:-200}"
+ANALYTIC_CDFQP_PADDING_VALUE="${ANALYTIC_CDFQP_PADDING_VALUE:-99.0}"
+ANALYTIC_CDFQP_FALLBACK_TO_NOMINAL="${ANALYTIC_CDFQP_FALLBACK_TO_NOMINAL:-true}"
 
 # qpth safety layer 数值参数：与新版 model.py 对齐
 USE_QP_BOX_CONSTRAINTS="${USE_QP_BOX_CONSTRAINTS:-true}"
@@ -85,31 +144,43 @@ QP_SUPPRESS_QPTH_WARNINGS="${QP_SUPPRESS_QPTH_WARNINGS:-true}"
 QPTH_FAIL_FALLBACK_TO_JAX="${QPTH_FAIL_FALLBACK_TO_JAX:-true}"
 
 # checkpoint 中如果含 lambda_raw/lambda_prior，评测节点会自动强制 true；这里默认 false 更兼容旧模型
-LEARNABLE_LAMBDA_SMOOTH="${LEARNABLE_LAMBDA_SMOOTH:-true}"
+if [[ "${NETWORK_ARCH}" == "pointnet2" ]]; then
+  LEARNABLE_LAMBDA_SMOOTH="${LEARNABLE_LAMBDA_SMOOTH:-false}"
+else
+  LEARNABLE_LAMBDA_SMOOTH="${LEARNABLE_LAMBDA_SMOOTH:-true}"
+fi
 LAMBDA_SMOOTH_MIN="${LAMBDA_SMOOTH_MIN:-1}"
 LAMBDA_SMOOTH_MAX="${LAMBDA_SMOOTH_MAX:-50.0}"
 LAMBDA_REG_WEIGHT="${LAMBDA_REG_WEIGHT:-0.0001}"
 
 # learnable CDF-G/h 参数：必须和训练端 argument.py 对齐
-USE_LEARNED_CDF_CONSTRAINTS="${USE_LEARNED_CDF_CONSTRAINTS:-true}"
+if [[ "${NETWORK_ARCH}" == "pointnet2" ]]; then
+  USE_LEARNED_CDF_CONSTRAINTS="${USE_LEARNED_CDF_CONSTRAINTS:-false}"
+else
+  USE_LEARNED_CDF_CONSTRAINTS="${USE_LEARNED_CDF_CONSTRAINTS:-false}"
+fi
 CDF_L_K="${CDF_L_K:-0.33}"
 CDF_R_EGO="${CDF_R_EGO:-0.31}"
 CDF_SENSE_RANGE="${CDF_SENSE_RANGE:-3.0}"
-CDF_ALPHA_INIT="${CDF_ALPHA_INIT:-0.25}"
+CDF_ALPHA_INIT="${CDF_ALPHA_INIT:-0.5}"
 CDF_ALPHA_MIN="${CDF_ALPHA_MIN:-0.10}"
 CDF_ALPHA_MAX="${CDF_ALPHA_MAX:-0.55}"
-LEARNABLE_CDF_ALPHA="${LEARNABLE_CDF_ALPHA:-true}"
-CDF_EPSILON_INIT="${CDF_EPSILON_INIT:-0.1}"
+LEARNABLE_CDF_ALPHA="${LEARNABLE_CDF_ALPHA:-false}"
+CDF_EPSILON_INIT="${CDF_EPSILON_INIT:-0.05}"
 CDF_EPSILON_MIN="${CDF_EPSILON_MIN:-0.05}"
 CDF_EPSILON_MAX="${CDF_EPSILON_MAX:-0.20}"
-LEARNABLE_CDF_EPSILON="${LEARNABLE_CDF_EPSILON:-true}"
+LEARNABLE_CDF_EPSILON="${LEARNABLE_CDF_EPSILON:-false}"
 CDF_RHO_FLOOR_INIT="${CDF_RHO_FLOOR_INIT:-0.0}"
 LEARNABLE_CDF_RHO_FLOOR="${LEARNABLE_CDF_RHO_FLOOR:-false}"
 CDF_MARGIN_INIT="${CDF_MARGIN_INIT:-0.0}"
 LEARNABLE_CDF_MARGIN="${LEARNABLE_CDF_MARGIN:-false}"
 CDF_VALID_POINT_ABS_MAX="${CDF_VALID_POINT_ABS_MAX:-50.0}"
 CDF_PADDING_VALUE="${CDF_PADDING_VALUE:-99.0}"
-LAMBDA_GH="${LAMBDA_GH:-0.001}"
+if [[ "${NETWORK_ARCH}" == "pointnet2" ]]; then
+  LAMBDA_GH="${LAMBDA_GH:-0.0}"
+else
+  LAMBDA_GH="${LAMBDA_GH:-0.001}"
+fi
 
 # 默认评估完整 5 个 demo 数量 × 3 个 dataset seed × 3 个 train seed = 45 个模型。
 # 想少跑可以覆盖，例如：
@@ -137,7 +208,10 @@ cat <<EOF2
 ============================================================
 DensityNet 批量评测开始
 LAUNCH                  = ${LAUNCH_PKG} ${LAUNCH_FILE}
+NETWORK_ARCH            = ${NETWORK_ARCH}
 MODEL_ROOT              = ${MODEL_ROOT}
+MODEL_SUBDIR_PREFIX     = ${MODEL_SUBDIR_PREFIX}
+MODEL_FILE_TEMPLATE     = ${MODEL_FILE_TEMPLATE:-<auto>}
 CSV_PATH                = ${CSV_PATH}
 TRAJ_DIR                = ${TRAJ_DIR}
 DEMO_LIST               = ${DEMO_LIST_STR}
@@ -146,18 +220,65 @@ TRAIN_SEED_LIST         = ${TRAIN_SEED_LIST_STR}
 NUM_EVAL_EPISODES       = ${NUM_EVAL_EPISODES}
 TARGET_MODE             = ${TARGET_MODE}
 FIXED_TARGET            = (${FIXED_TARGET_X}, ${FIXED_TARGET_Y})
+ABLATION                = ${ABLATION}
 RUNTIME_QP_MODE         = ${RUNTIME_QP_MODE}
+ENABLE_TEST_TIME_CDFQP  = ${ENABLE_TEST_TIME_CDFQP}
+ANALYTIC_CDFQP          = points=${ANALYTIC_CDFQP_NUM_POINTS}, padding=${ANALYTIC_CDFQP_PADDING_VALUE}, fallback=${ANALYTIC_CDFQP_FALLBACK_TO_NOMINAL}
 GRAPH_K/HIDDEN/LAMBDA   = ${GRAPH_K}/${HIDDEN_DIM}/${LAMBDA_SMOOTH}
+POINTNET2               = max_points=${POINTNET2_MAX_POINTS}, sa1=(${POINTNET2_NPOINT1},${POINTNET2_RADIUS1},${POINTNET2_NSAMPLE1}), sa2=(${POINTNET2_NPOINT2},${POINTNET2_RADIUS2},${POINTNET2_NSAMPLE2})
 QP box/normalize/fail   = ${USE_QP_BOX_CONSTRAINTS}/${QP_NORMALIZE_CONSTRAINTS}/${QP_FAIL_MODE}
 LEARNED_CDF             = ${USE_LEARNED_CDF_CONSTRAINTS}, alpha=[${CDF_ALPHA_MIN},${CDF_ALPHA_INIT},${CDF_ALPHA_MAX}], eps=[${CDF_EPSILON_MIN},${CDF_EPSILON_INIT},${CDF_EPSILON_MAX}]
 ============================================================
 EOF2
 
+resolve_model_file() {
+  local n="$1"
+  local ds="$2"
+  local ts="$3"
+  local model_file=""
+
+  if [[ -n "${MODEL_FILE_TEMPLATE}" ]]; then
+    model_file="${MODEL_FILE_TEMPLATE}"
+    model_file="${model_file//\{MODEL_ROOT\}/${MODEL_ROOT}}"
+    model_file="${model_file//\{N\}/${n}}"
+    model_file="${model_file//\{DS\}/${ds}}"
+    model_file="${model_file//\{TS\}/${ts}}"
+    model_file="${model_file//\{NETWORK_ARCH\}/${NETWORK_ARCH}}"
+    model_file="${model_file//\{ABLATION\}/${ABLATION}}"
+  else
+    model_file="${MODEL_ROOT}/${MODEL_SUBDIR_PREFIX}-demo${n}-dseed${ds}-seed${ts}/model_best_parametric_bc.pt"
+  fi
+
+  if [[ -f "${model_file}" ]]; then
+    echo "${model_file}"
+    return 0
+  fi
+
+  # 兼容 main.py 默认保存的 timestamp 目录，例如：
+  # ...arch-pointnet2-ablation-no_safety-demo48-dseed0-seed0-2026.../model_best_parametric_bc.pt
+  local candidates=()
+  mapfile -t candidates < <(
+    find "${MODEL_ROOT}" -maxdepth "${MODEL_FIND_MAXDEPTH}" -type f \
+      -path "*demo${n}-dseed${ds}-seed${ts}*/model_best_parametric_bc.pt" 2>/dev/null | sort
+  )
+
+  if [[ "${#candidates[@]}" -gt 0 ]]; then
+    if [[ "${#candidates[@]}" -gt 1 ]]; then
+      echo "[WARN] 找到多个候选模型，默认使用第一个:" >&2
+      printf '  %s\n' "${candidates[@]}" >&2
+    fi
+    echo "${candidates[0]}"
+    return 0
+  fi
+
+  echo "${model_file}"
+}
+
 for N in "${DEMO_LIST[@]}"; do
   for DS in "${DSEED_LIST[@]}"; do
     for TS in "${TRAIN_SEED_LIST[@]}"; do
-      MODEL_DIR="${MODEL_ROOT}/DensityNet-demo${N}-dseed${DS}-seed${TS}"
-      MODEL_FILE="${MODEL_DIR}/model_best_parametric_bc.pt"
+      MODEL_FILE="$(resolve_model_file "${N}" "${DS}" "${TS}")"
+      MODEL_DIR="$(dirname "${MODEL_FILE}")"
 
       echo ""
       echo "============================================================"
@@ -195,9 +316,22 @@ for N in "${DEMO_LIST[@]}"; do
         graph_k:="${GRAPH_K}" \
         lambda_smooth:="${LAMBDA_SMOOTH}" \
         qp_limit:="${QP_LIMIT}" \
+        network_arch:="${NETWORK_ARCH}" \
         ablation:="${ABLATION}" \
         nominal_speed:="${NOMINAL_SPEED}" \
+        pointnet2_max_points:="${POINTNET2_MAX_POINTS}" \
+        pointnet2_npoint1:="${POINTNET2_NPOINT1}" \
+        pointnet2_radius1:="${POINTNET2_RADIUS1}" \
+        pointnet2_nsample1:="${POINTNET2_NSAMPLE1}" \
+        pointnet2_npoint2:="${POINTNET2_NPOINT2}" \
+        pointnet2_radius2:="${POINTNET2_RADIUS2}" \
+        pointnet2_nsample2:="${POINTNET2_NSAMPLE2}" \
+        pointnet2_padding_value:="${POINTNET2_PADDING_VALUE}" \
         runtime_qp_mode:="${RUNTIME_QP_MODE}" \
+        enable_test_time_cdfqp:="${ENABLE_TEST_TIME_CDFQP}" \
+        analytic_cdfqp_num_points:="${ANALYTIC_CDFQP_NUM_POINTS}" \
+        analytic_cdfqp_padding_value:="${ANALYTIC_CDFQP_PADDING_VALUE}" \
+        analytic_cdfqp_fallback_to_nominal:="${ANALYTIC_CDFQP_FALLBACK_TO_NOMINAL}" \
         use_qp_box_constraints:="${USE_QP_BOX_CONSTRAINTS}" \
         qp_jitter:="${QP_JITTER}" \
         qp_normalize_constraints:="${QP_NORMALIZE_CONSTRAINTS}" \

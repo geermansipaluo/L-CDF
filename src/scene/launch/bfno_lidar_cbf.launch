@@ -1,0 +1,73 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- Main Gazebo/RViz closed-loop test for ego-centric LiDAR BFNO-Poisson-CBF. -->
+    <arg name="world" default="$(find scene)/worlds/world.world" />
+    <arg name="gui" default="false" />
+    <arg name="rviz" default="true" />
+
+    <!-- BFNO runtime parameters. Keep grid_n/local_size consistent with training dataset. -->
+    <arg name="bfno_code_dir" default="$(find sensor_cdf)/scripts/Born-FNO-CBF" />
+    <arg name="model_path" default="$(find sensor_cdf)/scripts/Born-FNO-CBF/results/lidar_local/checkpoints/best_bfno_checkpoint.pt" />
+    <arg name="backend" default="bfno" /> <!-- bfno, sor_gpu, sor_cpu -->
+    <arg name="device" default="cuda" />
+    <arg name="grid_n" default="128" />
+    <arg name="local_size" default="6.0" />
+    <arg name="max_range" default="3.0" />
+    <arg name="goal_x" default="15.0" />
+    <arg name="goal_y" default="0.0" />
+    <arg name="robot_radius" default="0.35" />
+    <arg name="control_rate" default="10.0" />
+
+    <include file="$(find scene)/launch/start.launch">
+        <arg name="world" value="$(arg world)" />
+        <arg name="gui" value="$(arg gui)" />
+    </include>
+
+    <include file="$(find jackal_description)/launch/description.launch" />
+    <include file="$(find jackal_control)/launch/control.launch">
+        <arg name="enable_ekf" value="false" />
+    </include>
+
+    <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
+        args="-urdf -model jackal -param robot_description -x 0 -y 0 -z 1.0" />
+
+    <!-- <include file="$(find local_map)/launch/for_simulation.launch" /> -->
+
+    <!-- <node pkg="obs_param" type="obs_kf" output="screen" name="obs_kf" /> -->
+
+    <!-- Do not start traj_generate or old perfect_lidar_bridge here.  This launch uses Gazebo /velodyne_points. -->
+    <node name="bfno_lidar_cbf" pkg="sensor_cdf" type="bfno_lidar_cbf_node.py" output="screen">
+        <param name="bfno_code_dir" value="$(arg bfno_code_dir)" />
+        <param name="model_path" value="$(arg model_path)" />
+        <param name="backend" value="$(arg backend)" />
+        <param name="device" value="$(arg device)" />
+        <param name="pointcloud_topic" value="/velodyne_points" />
+        <param name="odom_topic" value="/base_pose_ground_truth" />
+        <param name="world_frame" value="world" />
+        <param name="grid_n" value="$(arg grid_n)" />
+        <param name="local_size" value="$(arg local_size)" />
+        <param name="max_range" value="$(arg max_range)" />
+        <param name="robot_radius" value="$(arg robot_radius)" />
+        <param name="hit_radius" value="0.08" />
+        <param name="min_z" value="-0.25" />
+        <param name="max_z" value="1.20" />
+        <param name="goal_x" value="$(arg goal_x)" />
+        <param name="goal_y" value="$(arg goal_y)" />
+        <param name="control_rate" value="$(arg control_rate)" />
+        <param name="forcing_method" value="constant" />
+        <param name="f_constant" value="-5.0" />
+        <param name="b_flux" value="-5.0" />
+        <param name="h_born_mode" value="auto" />
+        <param name="projection_steps" value="0" />
+        <param name="lookahead" value="0.35" />
+        <param name="gamma" value="2.0" />
+        <param name="v_min" value="-0.25" />
+        <param name="v_max" value="0.8" />
+        <param name="w_max" value="1.6" />
+        <param name="publish_debug" value="true" />
+    </node>
+
+    <group if="$(arg rviz)">
+        <node name="rviz" pkg="rviz" type="rviz" args="-d $(find scene)/rviz_config/simulation.rviz" required="false" />
+    </group>
+</launch>

@@ -9,7 +9,10 @@ from jax import jit
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle, Ellipse
 from jaxproxqp.jaxproxqp import JaxProxQP
-
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['font.serif'] = ['Times']
+import matplotlib as mpl
+mpl.rcParams["axes.unicode_minus"] = False
 from env import get_env_pool
 
 
@@ -461,7 +464,7 @@ def draw_obstacles(ax, meta_obstacles):
                     color='gray',
                     alpha=0.3,
                     hatch='//',
-                    label='Static Rectangle' if idx == 0 else ""
+                    label='Static obstacle' if idx == 0 else ""
                 )
                 ax.add_patch(rect_patch)
             else:
@@ -486,7 +489,7 @@ def draw_obstacles(ax, meta_obstacles):
                 color='dimgray',
                 alpha=0.3,
                 hatch='\\\\',
-                label='Static Circle' if idx == 0 else ""
+                label='Static obstacle' if idx == 0 else ""
             )
             ax.add_patch(circle_patch)
 
@@ -516,7 +519,7 @@ if __name__ == '__main__':
 
     # 如果想直接测试不同目标位置，就把它改成 False，并手动指定 MANUAL_TARGET
     USE_ENV_TARGET = False
-    MANUAL_TARGET = np.array([14.08, -1.934], dtype=np.float32)
+    MANUAL_TARGET = np.array([14.08, -0.81], dtype=np.float32)
 
     # QP / 轨迹参数：EPSILON 不再固定，每一步在候选里自动选择
     EPSILON_CANDIDATES = [0.05, 0.05]
@@ -529,7 +532,7 @@ if __name__ == '__main__':
     # 运动学参数
     R_EGO_COLLISION = 0.31
     R_EGO_CDF = 0.55
-    L = 0.6
+    L = 0.31
     dt = 0.05
     total_steps = 2500
     SUCCESS_RADIUS = 0.43
@@ -689,23 +692,23 @@ if __name__ == '__main__':
     for i in range(len(traj_x) - 1):
         x_seg = [traj_x[i], traj_x[i + 1]]
         y_seg = [traj_y[i], traj_y[i + 1]]
-        if i < len(residuals) and residuals[i] > 0.1:
+        if i < len(residuals) and residuals[i] > 5.1:
             ax.plot(x_seg, y_seg, color='crimson', linewidth=3.5, zorder=3)
         else:
-            ax.plot(x_seg, y_seg, color='royalblue', linewidth=2.0, zorder=2)
+            ax.plot(x_seg, y_seg, color='red', linewidth=2.0, zorder=2)
 
     if is_collided and len(traj_x) > 0:
         ego_crash_circle = Circle(
             (traj_x[-1], traj_y[-1]),
             R_EGO_COLLISION,
             fill=False,
-            color='red',
+            color='black',
             linestyle='--',
             linewidth=2.0,
             label='Crash Outer Boundary'
         )
         ax.add_patch(ego_crash_circle)
-        ax.scatter(traj_x[-1], traj_y[-1], color='red', marker='X', s=150, zorder=5, label='Collision Point')
+        ax.scatter(traj_x[-1], traj_y[-1], color='black', marker='X', s=150, zorder=5, label='Collision Point')
 
     if len(traj_x) > 0:
         ax.scatter(traj_x[0], traj_y[0], color='green', marker='o', s=120, zorder=5, label='Start (0,0)')
@@ -713,22 +716,25 @@ if __name__ == '__main__':
                label=f'Target ({my_target[0]:.2f},{my_target[1]:.2f})')
 
     title_status = 'Success' if is_success else ('Collision' if is_collided else 'Stopped')
-    ax.set_xlabel("World X (m)", fontsize=12)
-    ax.set_ylabel("World Y (m)", fontsize=12)
-    ax.set_title(
-        f"Single-Scene Debugger (Scene ID: {ENV_ID}) - Global CDF-QP Trajectory [{title_status}]\n"
-        f"Target=({my_target[0]:.2f},{my_target[1]:.2f}), eps_adaptive={sorted(set(np.round(epsilon_hist, 3))) if len(epsilon_hist) > 0 else []}, lambda={LAMBDA_SMOOTH}, limit={QP_LIMIT}",
-        fontsize=12,
-        fontweight='bold'
-    )
-    ax.grid(True, linestyle=':', alpha=0.6)
+    ax.set_xlabel("X (m)", fontsize=20)
+    ax.set_ylabel("Y (m)", fontsize=20)
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
+    # ax.set_title(
+    #     f"Single-Scene Debugger (Scene ID: {ENV_ID}) - Global CDF-QP Trajectory [{title_status}]\n"
+    #     f"Target=({my_target[0]:.2f},{my_target[1]:.2f}), eps_adaptive={sorted(set(np.round(epsilon_hist, 3))) if len(epsilon_hist) > 0 else []}, lambda={LAMBDA_SMOOTH}, limit={QP_LIMIT}",
+    #     fontsize=12,
+    #     fontweight='bold'
+    # )
+    # ax.grid(False, linestyle=':', alpha=0.6)
+    ax.grid(False)
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlim(-1.0, 16.0)
-    ax.set_ylim(-4.0, 4.0)
+    ax.set_ylim(-2.0, 2.0)
 
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys(), loc='upper right')
+    ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=12)
 
     if not os.path.exists(target_dir):
         os.makedirs(target_dir)
@@ -737,7 +743,12 @@ if __name__ == '__main__':
     absolute_output_path = os.path.join(target_dir, file_name)
 
     plt.tight_layout()
-    plt.savefig(absolute_output_path, dpi=300)
+    plt.savefig(
+        absolute_output_path,
+        dpi=300,
+        bbox_inches='tight',
+        pad_inches=0.02,
+    )
     plt.close()
 
     print(f"🖼️ 图片已保存到: {absolute_output_path}")

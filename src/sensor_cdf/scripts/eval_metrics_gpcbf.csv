@@ -1,0 +1,6 @@
+algorithm,num_demos,demo_seed,train_seed,num_eval_episodes,test_target_seed,target_mode,fixed_target_x,fixed_target_y,goal_radius,l_k,r_ego,nominal_speed,world_u_limit,gp_length_scale,gp_noise,gp_h_shift,cbf_gamma,clf_gamma,arrival_count,success_count,collision_runs_count,collision_events,timeout_runs_count,infeasible_count,arrival_rate,success_rate,collision_rate,avg_collision_events
+GP-CBF,-1,-1,-1,10,2026,fixed,15.0,-1.0,0.4,0.33,0.31,1.0,1.0,0.6,0.01,0.6,0.8,2.0,10,9,1,1,0,1,1.0,0.9,0.1,0.1
+GP-CBF,-1,-1,-1,10,2026,fixed,15.0,-1.0,0.4,0.33,0.31,1.0,1.0,0.6,0.01,0.6,0.8,2.0,9,0,10,48,1,16,0.9,0.0,1.0,4.8
+GP-CBF,-1,-1,-1,10,2026,fixed,15.0,-1.0,0.4,0.33,0.31,1.0,1.0,0.6,0.01,0.6,0.8,2.0,10,0,10,109,0,0,1.0,0.0,1.0,10.9
+GP-CBF,-1,-1,-1,1,2026,fixed,15.0,-1.0,0.4,0.33,0.31,1.0,1.0,0.6,0.01,0.6,0.8,2.0,1,1,0,0,0,0,1.0,1.0,0.0,0.0
+GP-CBF,-1,-1,-1,1,2026,fixed,15.0,-1.0,0.4,0.33,0.31,1.0,1.0,0.6,0.01,0.6,0.8,2.0,1,1,0,0,0,0,1.0,1.0,0.0,0.0

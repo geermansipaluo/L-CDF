@@ -22,7 +22,7 @@
     <arg name="test_target_seed" default="2026" />
 
     <!-- 评测流程 -->
-    <arg name="num_eval_episodes" default="10" />
+    <arg name="num_eval_episodes" default="1" />
     <arg name="max_episode_time" default="80.0" />
     <arg name="hold_before_episode" default="2.0" />
     <arg name="goal_radius" default="0.4" />
@@ -34,8 +34,19 @@
     <arg name="graph_k" default="5" />
     <arg name="lambda_smooth" default="25.0" />
     <arg name="qp_limit" default="1.2" />
+    <arg name="network_arch" default="densitynet" />
     <arg name="ablation" default="full" />
     <arg name="nominal_speed" default="1.2" />
+
+    <!-- PointNet++-BC baseline 参数：仅 network_arch=pointnet2 时使用 -->
+    <arg name="pointnet2_max_points" default="200" />
+    <arg name="pointnet2_npoint1" default="64" />
+    <arg name="pointnet2_radius1" default="0.5" />
+    <arg name="pointnet2_nsample1" default="16" />
+    <arg name="pointnet2_npoint2" default="16" />
+    <arg name="pointnet2_radius2" default="1.0" />
+    <arg name="pointnet2_nsample2" default="16" />
+    <arg name="pointnet2_padding_value" default="99.0" />
 
     <!-- runtime_qp_mode: qpth=评估模型内部 safety_layer; jax=稳定 ProxQP 投影; nominal=只测 head -->
     <arg name="runtime_qp_mode" default="qpth" />
@@ -72,14 +83,14 @@
 
     <!-- learnable CDF-G/h 参数：与训练端 argument.py 对齐 -->
     <arg name="use_learned_cdf_constraints" default="true" />
-    <arg name="cdf_l_k" default="0.33" />
+    <arg name="cdf_l_k" default="0.38" />
     <arg name="cdf_r_ego" default="0.31" />
     <arg name="cdf_sense_range" default="3.0" />
-    <arg name="cdf_alpha_init" default="0.25" />
+    <arg name="cdf_alpha_init" default="0.5" />
     <arg name="cdf_alpha_min" default="0.10" />
     <arg name="cdf_alpha_max" default="0.55" />
     <arg name="learnable_cdf_alpha" default="true" />
-    <arg name="cdf_epsilon_init" default="0.1" />
+    <arg name="cdf_epsilon_init" default="0.05" />
     <arg name="cdf_epsilon_min" default="0.05" />
     <arg name="cdf_epsilon_max" default="0.20" />
     <arg name="learnable_cdf_epsilon" default="true" />
@@ -142,8 +153,17 @@
         <param name="graph_k" type="int" value="$(arg graph_k)" />
         <param name="lambda_smooth" type="double" value="$(arg lambda_smooth)" />
         <param name="qp_limit" type="double" value="$(arg qp_limit)" />
+        <param name="network_arch" value="$(arg network_arch)" />
         <param name="ablation" value="$(arg ablation)" />
         <param name="nominal_speed" type="double" value="$(arg nominal_speed)" />
+        <param name="pointnet2_max_points" type="int" value="$(arg pointnet2_max_points)" />
+        <param name="pointnet2_npoint1" type="int" value="$(arg pointnet2_npoint1)" />
+        <param name="pointnet2_radius1" type="double" value="$(arg pointnet2_radius1)" />
+        <param name="pointnet2_nsample1" type="int" value="$(arg pointnet2_nsample1)" />
+        <param name="pointnet2_npoint2" type="int" value="$(arg pointnet2_npoint2)" />
+        <param name="pointnet2_radius2" type="double" value="$(arg pointnet2_radius2)" />
+        <param name="pointnet2_nsample2" type="int" value="$(arg pointnet2_nsample2)" />
+        <param name="pointnet2_padding_value" type="double" value="$(arg pointnet2_padding_value)" />
         <param name="runtime_qp_mode" value="$(arg runtime_qp_mode)" />
 
         <param name="use_qp_box_constraints" type="bool" value="$(arg use_qp_box_constraints)" />

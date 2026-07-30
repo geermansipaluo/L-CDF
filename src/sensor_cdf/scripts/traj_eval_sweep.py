@@ -20,6 +20,7 @@ from gazebo_msgs.srv import SetModelState
 from torch_geometric.data import Data, Batch
 
 from model import UNet
+from pointnet2_policy import PointNet2Policy
 from data_generate import LocalSdfCdfPlanner
 
 
@@ -141,6 +142,21 @@ class ParametricEllipseTracker:
         self.model_ablation = str(rospy.get_param("~ablation", "full"))
         self.nominal_speed = float(rospy.get_param("~nominal_speed", 1.2))
 
+        self.network_arch = str(rospy.get_param("~network_arch", "densitynet")).lower()
+        if self.network_arch not in ("densitynet", "pointnet2"):
+            rospy.logwarn(f"未知 network_arch={self.network_arch}，自动改成 densitynet")
+            self.network_arch = "densitynet"
+
+        # PointNet++-BC baseline 参数；仅 network_arch=pointnet2 时使用。
+        self.pointnet2_max_points = int(rospy.get_param("~pointnet2_max_points", 200))
+        self.pointnet2_npoint1 = int(rospy.get_param("~pointnet2_npoint1", 64))
+        self.pointnet2_radius1 = float(rospy.get_param("~pointnet2_radius1", 0.5))
+        self.pointnet2_nsample1 = int(rospy.get_param("~pointnet2_nsample1", 16))
+        self.pointnet2_npoint2 = int(rospy.get_param("~pointnet2_npoint2", 16))
+        self.pointnet2_radius2 = float(rospy.get_param("~pointnet2_radius2", 1.0))
+        self.pointnet2_nsample2 = int(rospy.get_param("~pointnet2_nsample2", 16))
+        self.pointnet2_padding_value = float(rospy.get_param("~pointnet2_padding_value", 99.0))
+
         # runtime_qp_mode:
         #   qpth    : 完整评估当前模型内部 learned PyTorch CDF-G/h + qpth safety layer
         #   jax     : 网络 head 输出 u_nom，再调用 JAX/ProxQP 输出最终 u_safe；用于稳定部署对照
@@ -149,6 +165,9 @@ class ParametricEllipseTracker:
         if self.runtime_qp_mode not in ("qpth", "jax", "nominal"):
             rospy.logwarn(f"未知 runtime_qp_mode={self.runtime_qp_mode}，自动改成 qpth")
             self.runtime_qp_mode = "qpth"
+        if self.network_arch == "pointnet2" and self.runtime_qp_mode == "qpth":
+            rospy.logwarn("PointNet++-BC 没有内部 qpth safety layer，runtime_qp_mode=qpth 自动改成 nominal。")
+            self.runtime_qp_mode = "nominal"
 
         # qpth safety layer 参数。注意这些不会进入 state_dict，但必须和训练时的结构/数值设定一致。
         self.use_qp_box_constraints = ros_bool(rospy.get_param("~use_qp_box_constraints", True), True)
@@ -298,6 +317,7 @@ class ParametricEllipseTracker:
         rospy.loginfo("DensityNet 自动批量评测节点启动")
         rospy.loginfo(f"model_path              = {self.model_path}")
         rospy.loginfo(f"num_demos/dseed/seed    = {self.num_demos}/{self.demo_seed}/{self.train_seed}")
+        rospy.loginfo(f"network_arch            = {self.network_arch}")
         rospy.loginfo(f"runtime_qp_mode         = {self.runtime_qp_mode}")
         rospy.loginfo(f"graph_k/hidden/lambda   = {self.model_graph_k}/{self.model_hidden_dim}/{self.model_lambda_smooth}")
         rospy.loginfo(f"box/normalize/fail_mode = {self.use_qp_box_constraints}/{self.qp_normalize_constraints}/{self.qp_fail_mode}")
@@ -358,6 +378,24 @@ class ParametricEllipseTracker:
             if os.path.exists(candidate):
                 return candidate
         return path
+
+    def build_pointnet2_kwargs(self):
+        return {
+            "state_dim": self.model_state_dim,
+            "hidden_dim": self.model_hidden_dim,
+            "max_points": self.pointnet2_max_points,
+            "output_scale": self.nominal_speed,
+            "point_dim": 2,
+            "npoint1": self.pointnet2_npoint1,
+            "radius1": self.pointnet2_radius1,
+            "nsample1": self.pointnet2_nsample1,
+            "npoint2": self.pointnet2_npoint2,
+            "radius2": self.pointnet2_radius2,
+            "nsample2": self.pointnet2_nsample2,
+            "padding_value": self.pointnet2_padding_value,
+            "enable_timing_debug": False,
+            "timing_sync_cuda": False,
+        }
 
     def build_model_kwargs(self):
         candidate_kwargs = {
@@ -425,6 +463,25 @@ class ParametricEllipseTracker:
 
         try:
             state_dict = extract_state_dict(safe_torch_load(model_path, map_location=self.device))
+
+            if self.network_arch == "pointnet2":
+                model_kwargs = self.build_pointnet2_kwargs()
+                model = PointNet2Policy(**model_kwargs)
+                try:
+                    model.load_state_dict(state_dict, strict=True)
+                except RuntimeError as strict_e:
+                    rospy.logerr("PointNet++ strict=True 加载失败：通常是 network_arch/hidden_dim/PointNet++ 参数与训练端不一致。")
+                    rospy.logerr(f"model_kwargs={model_kwargs}")
+                    raise strict_e
+                model = model.to(self.device).eval()
+                rospy.loginfo(
+                    f"PointNet++-BC 模型装载成功: {model_path}; mode={self.runtime_qp_mode}; "
+                    f"hidden={self.model_hidden_dim}; max_points={self.pointnet2_max_points}; "
+                    f"sa1=({self.pointnet2_npoint1},{self.pointnet2_radius1},{self.pointnet2_nsample1}); "
+                    f"sa2=({self.pointnet2_npoint2},{self.pointnet2_radius2},{self.pointnet2_nsample2})"
+                )
+                return model
+
             ckpt_has_learnable_lambda = (
                 "safety_layer.lambda_raw" in state_dict
                 or "safety_layer.lambda_prior" in state_dict
@@ -964,12 +1021,75 @@ class ParametricEllipseTracker:
 
     def save_trajectory_data(self):
         try:
-            tag = f"demo{self.num_demos}_dseed{self.demo_seed}_seed{self.train_seed}_{self.runtime_qp_mode}_{self.target_mode}"
-            trajectory_save_path = os.path.join(self.trajectory_save_dir, f"trajectory_{tag}.pt")
+            # ============================================================
+            # 1. 根据当前实验设置判断保存标签 mode
+            # ============================================================
+            ablation = str(getattr(self, "model_ablation", "full"))
+
+            learnable_lambda = bool(getattr(self, "learnable_lambda_smooth", True))
+            learnable_alpha = bool(getattr(self, "learnable_cdf_alpha", True))
+            learnable_epsilon = bool(getattr(self, "learnable_cdf_epsilon", True))
+            use_learned_cdf = bool(getattr(self, "use_learned_cdf_constraints", True))
+
+            # 注意判断顺序：
+            # no_safety / no_dual / no_consistency 是显式 ablation，优先级最高；
+            # full 下面再区分 wo_lambda / wo_learnable / wo_learned_cdf 等参数消融。
+            if ablation == "no_safety":
+                mode = "wo_safety"
+
+            elif ablation == "no_dual":
+                mode = "wo_dual"
+
+            elif ablation == "no_consistency":
+                mode = "wo_consistency"
+
+            elif ablation == "full":
+                if not use_learned_cdf:
+                    mode = "wo_learned_cdf"
+
+                elif (not learnable_alpha) and (not learnable_epsilon):
+                    mode = "wo_learnable"
+
+                elif not learnable_lambda:
+                    mode = "wo_lambda"
+
+                else:
+                    mode = "full"
+
+            else:
+                # 防御未知 ablation，避免报错，同时文件名里保留原始标签
+                mode = f"ablation_{ablation}"
+
+            # ============================================================
+            # 2. 组合更完整的文件名，避免覆盖
+            # ============================================================
+            network_arch = str(getattr(self, "network_arch", "DensityNet"))
+
+            num_demos = getattr(self, "num_demos", -1)
+            demo_seed = getattr(self, "demo_seed", -1)
+            train_seed = getattr(self, "train_seed", -1)
+            target_mode = str(getattr(self, "target_mode", "unknown"))
+            runtime_qp_mode = str(getattr(self, "runtime_qp_mode", "unknown"))
+
+            tag = (
+                f"{network_arch}_"
+                f"mode-{mode}_"
+                f"ablation-{ablation}_"
+                f"runtime-{runtime_qp_mode}_"
+                f"target-{target_mode}"
+            )
+
+            trajectory_save_path = os.path.join(
+                self.trajectory_save_dir,
+                f"trajectory_{tag}.pt"
+            )
+
             torch.save(self.all_runs_trajectories, trajectory_save_path)
+
             rospy.loginfo(
                 f"轨迹落盘成功: {len(self.all_runs_trajectories)} 回合 -> {trajectory_save_path}"
             )
+
         except Exception as e:
             rospy.logerr(f"保存轨迹数据失败: {str(e)}")
 
@@ -985,6 +1105,7 @@ class ParametricEllipseTracker:
         print("\n" + " DensityNet 自动评测报告 ".center(70, "="))
         print(f"模型路径             : {self.resolve_model_path(self.model_path)}")
         print(f"num_demos/demo_seed  : {self.num_demos}/{self.demo_seed}, train_seed={self.train_seed}")
+        print(f"network_arch         : {self.network_arch}")
         print(f"runtime_qp_mode      : {self.runtime_qp_mode}")
         print(f"target_mode/target   : {self.target_mode}/{self.target_pos}")
         print(f"进度                 : {completed_runs} / {self.total_eval_episodes}")
@@ -1012,6 +1133,8 @@ class ParametricEllipseTracker:
             "fixed_target_x": self.fixed_target_x,
             "fixed_target_y": self.fixed_target_y,
             "runtime_qp_mode": self.runtime_qp_mode,
+            "network_arch": self.network_arch,
+            "pointnet2_max_points": self.pointnet2_max_points if self.network_arch == "pointnet2" else None,
             "graph_k": self.model_graph_k,
             "hidden_dim": self.model_hidden_dim,
             "lambda_smooth": self.model_lambda_smooth,
